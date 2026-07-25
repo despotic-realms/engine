@@ -73,7 +73,7 @@ describe('graph', () => {
     const loyalties = edgesOfType(g, 'loyalty').map((e) => e.id);
     expect(loyalties).toEqual(['loyalty:c:bar->p:x', 'loyalty:c:foo->p:x']);
   });
-  it('edgesTo returns sorted type-filtered results', () => {
+  it('edgesTo covers type filter and sortedness together', () => {
     let g = emptyGraph();
     g = addNode(g, { id: 'c:alice', type: 'character', props: {} });
     g = addNode(g, { id: 'c:bob', type: 'character', props: {} });
@@ -82,6 +82,8 @@ describe('graph', () => {
     g = addEdge(g, { type: 'route', src: 'c:charlie', dst: 'p:home', props: {} });
     g = addEdge(g, { type: 'loyalty', src: 'c:bob', dst: 'p:home', props: {} });
     g = addEdge(g, { type: 'loyalty', src: 'c:alice', dst: 'p:home', props: {} });
+    const toLoyalty = edgesTo(g, 'p:home', 'loyalty');
+    expect(toLoyalty.map((e) => e.id)).toEqual(['loyalty:c:alice->p:home', 'loyalty:c:bob->p:home']);
     const toHome = edgesTo(g, 'p:home');
     expect(toHome.map((e) => e.id)).toEqual(['loyalty:c:alice->p:home', 'loyalty:c:bob->p:home', 'route:c:charlie->p:home']);
   });
