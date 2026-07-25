@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { fx } from '../src/fx.js';
 import { makeFortune } from '../src/fortune.js';
 import { initialState, resolveTick, validateDecisions, type SeasonConfig } from '../src/tick.js';
 import { starterSeason } from '../src/decks/starter.js';
+import { setNodeProp } from '../src/graph.js';
 
 const season = starterSeason();
 const f = makeFortune('tick-test-seed');
@@ -119,7 +121,11 @@ describe('defaulted briefs with failing ops', () => {
     // Build a season whose only storylet's DEFAULT drains grain that an
     // attended op will already have spent this tick.
     const drainOption = { id: 'drain', label: 'Drain', ops: [{ kind: 'release_grain' as const, placeId: '$p', amount: '240' }] };
-    const season = starterSeason();
+    const baseSeason = starterSeason();
+    // Override granary to 350: tick-0 consumes ~100, leaving 250 for the two-drain test.
+    // Attended drain of 240 succeeds, leaves 10; default drain of 240 fails.
+    const modifiedGraph = setNodeProp(baseSeason.initialGraph, 'place:thornfield', 'granary', fx('350'));
+    const season = { ...baseSeason, initialGraph: modifiedGraph };
     const s: SeasonConfig = {
       ...season,
       decks: [{
@@ -147,8 +153,11 @@ describe('defaulted briefs with failing ops', () => {
     const a = out.packet.briefs.find((b) => b.storyletId === 'starter.a')!;
     out = resolveTick(s, out.state, { seatId: 'seat:throne', choices: [{ briefId: a.briefId, optionId: 'drain' }] }, f);
     const rejected = out.events.filter((e) => e.type === 'op.rejected');
-    const defaultRejected = rejected.filter((e) => e.data['via'] === 'default');
-    expect(defaultRejected).toHaveLength(1);
-    expect(String(defaultRejected[0]?.data['error'])).toContain('grain');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.data['via']).toBe('default');
+    expect(String(rejected[0]?.data['error'])).toContain('grain');
+    // Verify the rejected event traces to brief.defaulted
+    const defaultedEvent = out.events.find((e) => e.type === 'brief.defaulted');
+    expect(rejected[0]?.parents).toContain(defaultedEvent?.id);
   });
 });
