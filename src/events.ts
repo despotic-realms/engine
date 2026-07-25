@@ -43,6 +43,13 @@ export function applyDeltas(g: WorldGraph, ds: GraphDelta[]): WorldGraph {
 export interface Emitter {
   emit(type: string, e?: { parents?: string[]; deltas?: GraphDelta[]; data?: Record<string, unknown> }): ChronicleEvent;
   all(): ChronicleEvent[];
+  // The id the *next* emit() call will mint (same `t{tick}.{seq}` scheme),
+  // without recording an event. Lets a caller stamp a delta with a
+  // reference to its own soon-to-exist causing event (e.g. an op planting a
+  // node whose prop must point back at the op's event) as long as nextId()
+  // is read immediately before the matching emit(), with no other emit()
+  // call for this tick landing in between.
+  nextId(): string;
 }
 
 export function makeEmitter(tick: number): Emitter {
@@ -73,5 +80,6 @@ export function makeEmitter(tick: number): Emitter {
       return ev;
     },
     all: () => [...events],
+    nextId: () => `t${tick}.${events.length}`,
   };
 }

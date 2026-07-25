@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { hashValue } from '../src/canon.js';
 import { fx, fxToString } from '../src/fx.js';
-import { findEdge, getNode, propFx, propInt } from '../src/graph.js';
-import { makeEmitter } from '../src/events.js';
+import { edgeId, findEdge, getNode, propFx, propInt, removeEdge, setNodeProp } from '../src/graph.js';
+import { applyDeltas, makeEmitter } from '../src/events.js';
 import { applyOp, validateOp } from '../src/ops.js';
 import { thornfieldGraph } from '../src/decks/thornfield.js';
 
@@ -83,5 +84,63 @@ describe('applyOp', () => {
   });
   it('insufficient treasury fails at validate', () => {
     expect(validateOp(g0, { kind: 'grant', charId: 'char:osric', amount: '999' }).ok).toBe(false);
+  });
+});
+
+describe('validateOp resource/referential checks (scoped per-arm reads)', () => {
+  it('rejects audit on a vacant office', () => {
+    const vacant = removeEdge(g0, edgeId('appointment', 'char:osric', 'office:steward'));
+    const r = validateOp(vacant, { kind: 'audit', officeId: 'office:steward' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('office is vacant');
+  });
+  it('rejects stockpile_grain the treasury cannot afford', () => {
+    const r = validateOp(g0, { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '700' }); // 700*0.5=350 > 300
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('treasury cannot afford it');
+  });
+  it('rejects audit the treasury cannot afford', () => {
+    const poor = setNodeProp(g0, 'inst:crown', 'treasury', fx('10')); // < AUDIT_COST (20)
+    const r = validateOp(poor, { kind: 'audit', officeId: 'office:steward' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('treasury cannot afford an audit');
+  });
+  it('rejects invest the treasury cannot afford', () => {
+    const r = validateOp(g0, { kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '999' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('treasury cannot afford it');
+  });
+});
+
+// D14: chronicle events ARE graph deltas. Every op's emitted event must carry
+// deltas that, applied independently to the pre-op graph, reproduce exactly
+// the graph applyOp itself returned -- the applied change and the recorded
+// change must never be able to drift apart.
+describe('applyOp delta-equivalence (spec D14)', () => {
+  const cases: Array<[string, unknown]> = [
+    ['decree_tax', { kind: 'decree_tax', placeId: 'place:thornfield', rateBp: 1500 }],
+    ['release_grain', { kind: 'release_grain', placeId: 'place:thornfield', amount: '20' }],
+    ['stockpile_grain', { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }],
+    ['appoint', { kind: 'appoint', charId: 'char:maud', officeId: 'office:steward' }],
+    ['audit', { kind: 'audit', officeId: 'office:steward' }],
+    ['grant', { kind: 'grant', charId: 'char:osric', amount: '100' }],
+    ['invest', { kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '80' }],
+  ];
+
+  it.each(cases)('%s: event.deltas replay to the same graph applyOp produced', (_name, op) => {
+    const em = makeEmitter(3);
+    const post = applyOp(g0, ok(op), 3, em);
+    const ev = em.all()[0]!;
+    expect(ev.deltas.length).toBeGreaterThan(0);
+    const replayed = applyDeltas(g0, ev.deltas);
+    expect(hashValue(replayed)).toBe(hashValue(post));
+  });
+
+  it("invest stamps the project node's causeEventId with the id emit actually mints", () => {
+    const em = makeEmitter(3);
+    applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'roads', amount: '50' }), 3, em);
+    const ev = em.all()[0]!;
+    const replayed = applyDeltas(g0, ev.deltas);
+    expect(getNode(replayed, 'proj:roads:place:thornfield').props['causeEventId']).toBe(ev.id);
   });
 });

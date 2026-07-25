@@ -36,6 +36,14 @@ export function divFx(a: Fx, b: Fx): Fx {
   return floorDiv(a * FX_SCALE, b);
 }
 
+// Whole-unit part of x, floor-rounded toward -infinity (so e.g. -0.0001
+// whole-units to -1, not 0) -- the negative-safe complement to fxToString's
+// fractional part. Callers who need an integer count of whole units (basis
+// points off a fixed rate, say) use this instead of a bare `/`.
+export function fxWhole(x: Fx): bigint {
+  return floorDiv(x, FX_SCALE);
+}
+
 export function clampFx(x: Fx, lo: Fx, hi: Fx): Fx {
   return x < lo ? lo : x > hi ? hi : x;
 }

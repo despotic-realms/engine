@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FX_ONE, FX_SCALE, clampFx, divFx, fx, fxFromInt, fxToString, mulFx } from '../src/fx.js';
+import { FX_ONE, FX_SCALE, clampFx, divFx, fx, fxFromInt, fxToString, fxWhole, mulFx } from '../src/fx.js';
 
 describe('fx', () => {
   it('parses decimal strings at scale 10^4', () => {
@@ -27,5 +27,10 @@ describe('fx', () => {
     expect(fxToString(3333n)).toBe('0.3333');
     expect(fxToString(fx('-2.5'))).toBe('-2.5');
     expect(fxToString(fx('7'))).toBe('7');
+  });
+  it('extracts the whole-unit part with floor semantics (negative-safe)', () => {
+    expect(fxWhole(fx('2.5'))).toBe(2n);
+    expect(fxWhole(fx('-0.0001'))).toBe(-1n);
+    expect(fxWhole(fx('250'))).toBe(250n);
   });
 });
