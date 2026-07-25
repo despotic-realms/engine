@@ -32,11 +32,12 @@ export type Op =
   | { kind: 'disband_levy'; placeId: string }
   | { kind: 'send_envoy'; charId: string; tone: 'conciliatory' | 'firm' | 'threatening' }
   | { kind: 'seize'; charId: string; amount: string }
-  | { kind: 'hold_festival'; placeId: string; amount: string };
+  | { kind: 'hold_festival'; placeId: string; amount: string }
+  | { kind: 'record_stance'; stanceId: string; value: 'for' | 'against' };
 
 export interface OpParamDesc {
   name: string;
-  type: 'nodeId' | 'fx' | 'int' | 'enum';
+  type: 'nodeId' | 'fx' | 'int' | 'enum' | 'stanceId';
   nodeType?: NodeType;
   min?: number;
   max?: number;
@@ -131,6 +132,13 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'amount', type: 'fx' },
     ],
   },
+  record_stance: {
+    summary: 'Record the throne’s stance on a named question; the chronicle and later storylets read it.',
+    params: [
+      { name: 'stanceId', type: 'stanceId' },
+      { name: 'value', type: 'enum', values: ['for', 'against'] },
+    ],
+  },
 };
 
 export type OpResult = { ok: true; op: Op } | { ok: false; error: string };
@@ -147,6 +155,23 @@ function parseAmount(v: unknown): Fx | string {
 
 function treasury(g: WorldGraph): Fx {
   return propFx(getNode(g, 'inst:crown').props, 'treasury');
+}
+
+// Stance ids name a consistency-probe question ('granary-doctrine', not a
+// node): lowercase kebab-case, 1-40 chars, never starting with a hyphen.
+// Char-by-char rather than a regex literal -- ops.ts is not in
+// check-no-float's DIVIDE_ALLOW, and this sidesteps the question of whether
+// a regex literal's delimiters would trip the bare-'/' scan entirely.
+function isStanceId(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length < 1 || v.length > 40) return false;
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i);
+    const isDigit = c >= 48 && c <= 57; // '0'-'9'
+    const isLower = c >= 97 && c <= 122; // 'a'-'z'
+    const isHyphen = c === 45; // '-'
+    if (!isDigit && !isLower && !(isHyphen && i > 0)) return false;
+  }
+  return true;
 }
 
 export function validateOp(g: WorldGraph, raw: unknown): OpResult {
@@ -172,6 +197,8 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
       if (typeof a === 'string') return { ok: false, error: a };
     } else if (p.type === 'enum') {
       if (typeof v !== 'string' || !p.values?.includes(v)) return { ok: false, error: `bad '${p.name}'` };
+    } else if (p.type === 'stanceId') {
+      if (!isStanceId(v)) return { ok: false, error: `bad '${p.name}'` };
     }
   }
   // Referential/resource checks beyond shape. Each branch reads only the
@@ -465,6 +492,15 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.hold_festival', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'record_stance': {
+      // No prior read: the value is written unconditionally, and
+      // re-recording the same stanceId is meant to overwrite -- that
+      // reversal, visible in the chronicle, IS the consistency probe.
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: 'inst:crown', key: 'stance:' + op.stanceId, value: op.value }];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.record_stance', { parents, data: { ...op }, deltas });
       return g2;
     }
   }

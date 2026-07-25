@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { hashValue } from '../src/canon.js';
 import { fx, fxToString } from '../src/fx.js';
-import { addEdge, addNode, edgeId, findEdge, getNode, propFx, propInt, removeEdge, setNodeProp } from '../src/graph.js';
+import { addEdge, addNode, edgeId, findEdge, getNode, propFx, propInt, propStr, removeEdge, setNodeProp } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
 import { applyOp, validateOp } from '../src/ops.js';
+import { matchPattern } from '../src/match.js';
+import type { GraphPattern } from '../src/match.js';
 import { thornfieldGraph } from '../src/decks/thornfield.js';
 
 const g0 = thornfieldGraph();
@@ -133,6 +135,7 @@ describe('applyOp delta-equivalence (spec D14)', () => {
     ['audit', { kind: 'audit', officeId: 'office:steward' }],
     ['grant', { kind: 'grant', charId: 'char:osric', amount: '100' }],
     ['invest', { kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '80' }],
+    ['record_stance', { kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }],
   ];
 
   it.each(cases)('%s: event.deltas replay to the same graph applyOp produced', (_name, op) => {
@@ -374,5 +377,61 @@ describe('tier-2 op pack: both sides of every branch (regression pins)', () => {
     const r = validateOp(g0, { kind: 'hold_festival', placeId: 'place:thornfield', amount: '350' });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe('treasury cannot afford it');
+  });
+});
+
+// record_stance (v0.1.1): a drift-immune commitment marker for consistency
+// probes. Unlike loyalty/grudge bp gates (which drift ±100/tick from
+// socialStep unconditionally) or taxRateBp gates (satisfiable by sibling
+// storylets' side effects), a stance is only ever written by this one op,
+// so a setter/callback storylet pair gated on it can only be unlocked by
+// the setter actually firing -- never by ambient drift or an unrelated op.
+describe('record_stance: validate', () => {
+  it('accepts both stance values and a hyphenated 40-char id', () => {
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }).ok).toBe(true);
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: 'granary-doctrine', value: 'against' }).ok).toBe(true);
+    const forty = 'a'.repeat(20) + '-' + 'b'.repeat(19); // 20 + 1 + 19 = 40 chars, hyphenated
+    expect(forty.length).toBe(40);
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: forty, value: 'for' }).ok).toBe(true);
+  });
+  it('rejects malformed stance ids', () => {
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: '', value: 'for' }).ok).toBe(false); // empty
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: 'Granary-Doctrine', value: 'for' }).ok).toBe(false); // uppercase
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: 'a'.repeat(41), value: 'for' }).ok).toBe(false); // 41 chars
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: 'granary doctrine', value: 'for' }).ok).toBe(false); // space
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: '-granary', value: 'for' }).ok).toBe(false); // leading hyphen
+  });
+  it('rejects a value outside the for/against enum', () => {
+    expect(validateOp(g0, { kind: 'record_stance', stanceId: 'granary-doctrine', value: 'maybe' }).ok).toBe(false);
+  });
+});
+
+describe('record_stance: apply', () => {
+  it("sets stance:<id> on the crown and chronicles it", () => {
+    const em = makeEmitter(3);
+    const g = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em);
+    expect(propStr(getNode(g, 'inst:crown').props, 'stance:granary-doctrine')).toBe('for');
+    expect(em.all()[0]?.type).toBe('op.record_stance');
+    expect(em.all()[0]?.data['stanceId']).toBe('granary-doctrine');
+  });
+  it('re-recording the same stanceId overwrites -- the reversal is the chronicle-visible probe', () => {
+    const em1 = makeEmitter(3);
+    const g1 = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em1);
+    expect(propStr(getNode(g1, 'inst:crown').props, 'stance:granary-doctrine')).toBe('for');
+    const em2 = makeEmitter(4);
+    const g2 = applyOp(g1, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'against' }), 4, em2);
+    expect(propStr(getNode(g2, 'inst:crown').props, 'stance:granary-doctrine')).toBe('against');
+  });
+});
+
+describe('record_stance: storylet gate mechanism (matchPattern integration)', () => {
+  it('a stance-gated pattern matches only after the op records the matching stance', () => {
+    const pattern: GraphPattern = {
+      nodes: [{ as: 'crown', type: 'institution', where: [{ prop: 'stance:granary-doctrine', cmp: 'eq', value: 'for' }] }],
+    };
+    expect(matchPattern(g0, pattern)).toEqual([]); // no stance recorded yet
+    const em = makeEmitter(3);
+    const g = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em);
+    expect(matchPattern(g, pattern)).toEqual([{ crown: 'inst:crown' }]);
   });
 });
