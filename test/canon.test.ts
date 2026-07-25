@@ -21,4 +21,23 @@ describe('canon', () => {
     expect(hashValue({ a: 1n })).not.toBe(hashValue({ a: 2n }));
     expect(hashValue({ a: 1n })).toMatch(/^[0-9a-f]{16}$/);
   });
+  it('sorts keys lexicographically, not by numeric value', () => {
+    const s = canonJson({ '10': 1, '2': 2, x: 3 });
+    expect(s).toBe('{"10":1,"2":2,"x":3}'); // '10' < '2' < 'x' as strings
+    expect(fromCanon(s)).toEqual({ '10': 1, '2': 2, x: 3 });
+  });
+  it('rejects Map/Set/class instances instead of silently encoding them as {}', () => {
+    class NotPlain {} // stands in for Date/Error/any other class instance
+    expect(() => canonJson(new Map())).toThrow();
+    expect(() => canonJson(new Set())).toThrow();
+    expect(() => canonJson(new NotPlain())).toThrow();
+  });
+  it('still accepts a null-prototype object', () => {
+    const o: Record<string, unknown> = Object.create(null);
+    o.a = 1;
+    expect(canonJson(o)).toBe('{"a":1}');
+  });
+  it('rejects a reserved key at nested depth, not just top level', () => {
+    expect(() => canonJson({ outer: { $n: 'sneaky' } })).toThrow();
+  });
 });
