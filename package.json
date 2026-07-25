@@ -1,0 +1,23 @@
+{
+  "name": "@despotic-realms/engine",
+  "version": "0.0.1",
+  "description": "Deterministic governance-simulation core for Despotic Realms. Pure, I/O-free: resolveTick(season, state, decisions, fortune). No LLM in resolution.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check:float": "node scripts/check-no-float.mjs",
+    "demo": "npm run build && node dist/demo.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  }
+}
