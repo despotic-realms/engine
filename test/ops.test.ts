@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { hashValue } from '../src/canon.js';
 import { fx, fxToString } from '../src/fx.js';
-import { edgeId, findEdge, getNode, propFx, propInt, removeEdge, setNodeProp } from '../src/graph.js';
+import { addNode, edgeId, findEdge, getNode, propFx, propInt, removeEdge, setNodeProp } from '../src/graph.js';
+import type { WorldGraph } from '../src/graph.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
 import { applyOp, validateOp } from '../src/ops.js';
 import { thornfieldGraph } from '../src/decks/thornfield.js';
@@ -149,5 +150,143 @@ describe('applyOp delta-equivalence (spec D14)', () => {
     const ev = em.all()[0]!;
     const replayed = applyDeltas(g0, ev.deltas);
     expect(getNode(replayed, 'proj:roads:place:thornfield').props['causeEventId']).toBe(ev.id);
+  });
+});
+
+// Tier-2 op pack (P2 Task 4): imprison/pardon, the levy ops, envoys, seize,
+// festivals. tier2ish() gives these their preconditions -- Maud gains
+// seizable wealth, Vane arrives with no history at all (a clean slate for
+// send_envoy's "create the edge" branches).
+function tier2ish() {
+  let g = thornfieldGraph();
+  g = setNodeProp(g, 'char:maud', 'wealth', fx('400'));
+  g = addNode(g, { id: 'char:vane', type: 'character', props: { name: 'Vane' } });
+  return g;
+}
+
+describe('tier-2 op pack: validate', () => {
+  const g = tier2ish();
+  it('accepts the seven new ops', () => {
+    expect(validateOp(g, { kind: 'imprison', charId: 'char:maud' }).ok).toBe(true);
+    expect(validateOp(g, { kind: 'raise_levy', placeId: 'place:thornfield', size: '50' }).ok).toBe(true);
+    expect(validateOp(g, { kind: 'send_envoy', charId: 'char:vane', tone: 'threatening' }).ok).toBe(true);
+    expect(validateOp(g, { kind: 'seize', charId: 'char:maud', amount: '100' }).ok).toBe(true);
+    expect(validateOp(g, { kind: 'hold_festival', placeId: 'place:thornfield', amount: '40' }).ok).toBe(true);
+  });
+  it('rejects bad preconditions', () => {
+    expect(validateOp(g, { kind: 'imprison', charId: 'char:ruler' }).ok).toBe(false);          // never the ruler
+    expect(validateOp(g, { kind: 'pardon', charId: 'char:maud' }).ok).toBe(false);             // not imprisoned
+    expect(validateOp(g, { kind: 'disband_levy', placeId: 'place:thornfield' }).ok).toBe(false); // no levy raised
+    expect(validateOp(g, { kind: 'seize', charId: 'char:osric', amount: '10' }).ok).toBe(false); // no wealth prop
+    expect(validateOp(g, { kind: 'seize', charId: 'char:maud', amount: '999' }).ok).toBe(false); // > wealth
+    expect(validateOp(g, { kind: 'send_envoy', charId: 'char:vane', tone: 'rude' }).ok).toBe(false); // bad enum
+    expect(validateOp(g, { kind: 'hold_festival', placeId: 'place:thornfield', amount: '5' }).ok).toBe(false); // < 10 floor
+    expect(validateOp(g, { kind: 'raise_levy', placeId: 'place:thornfield', size: '9999' }).ok).toBe(false); // unaffordable
+  });
+});
+
+describe('tier-2 op pack: apply', () => {
+  it('imprison vacates offices and kindles a grudge', () => {
+    const g0 = tier2ish();
+    const em = makeEmitter(3);
+    const r = validateOp(g0, { kind: 'imprison', charId: 'char:osric' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 3, em);
+    expect(getNode(g, 'char:osric').props['imprisoned']).toBe(true);
+    expect(findEdge(g, 'appointment', 'char:osric', 'office:steward')).toBeUndefined();
+    expect(findEdge(g, 'grudge', 'char:osric', 'char:ruler')?.props['bp']).toBe(2500);
+  });
+  it('pardon releases, cools the grudge, warms loyalty', () => {
+    let g0 = tier2ish();
+    const em0 = makeEmitter(3);
+    const r0 = validateOp(g0, { kind: 'imprison', charId: 'char:osric' });
+    if (!r0.ok) throw new Error(r0.error);
+    g0 = applyOp(g0, r0.op, 3, em0);
+    const em = makeEmitter(4);
+    const r = validateOp(g0, { kind: 'pardon', charId: 'char:osric' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 4, em);
+    expect(getNode(g, 'char:osric').props['imprisoned']).toBe(false);
+    expect(findEdge(g, 'grudge', 'char:osric', 'char:ruler')?.props['bp']).toBe(1000); // 2500 - 1500
+    expect(findEdge(g, 'loyalty', 'char:osric', 'char:ruler')?.props['bp']).toBe(4700); // 4200 + 500
+  });
+  it('raise_levy costs LEVY_RAISE_COST per unit; disband zeroes', () => {
+    const g0 = tier2ish();
+    const em = makeEmitter(3);
+    const r = validateOp(g0, { kind: 'raise_levy', placeId: 'place:thornfield', size: '50' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 3, em);
+    expect(propFx(getNode(g, 'place:thornfield').props, 'levy')).toBe(fx('50'));
+    expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('260')); // 300 - 50*0.8
+  });
+  it('send_envoy tones move edges deterministically', () => {
+    const g0 = tier2ish(); // maud grudge 6500
+    const em = makeEmitter(3);
+    const rc = validateOp(g0, { kind: 'send_envoy', charId: 'char:maud', tone: 'conciliatory' });
+    if (!rc.ok) throw new Error(rc.error);
+    const gc = applyOp(g0, rc.op, 3, em);
+    expect(findEdge(gc, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(5700); // 6500 - 800
+    const rt = validateOp(g0, { kind: 'send_envoy', charId: 'char:vane', tone: 'threatening' });
+    if (!rt.ok) throw new Error(rt.error);
+    const gt = applyOp(g0, rt.op, 3, em);
+    expect(findEdge(gt, 'grudge', 'char:vane', 'char:ruler')?.props['bp']).toBe(600); // created
+  });
+  it('seize transfers wealth, kindles grudge, costs legitimacy', () => {
+    const g0 = tier2ish();
+    const em = makeEmitter(3);
+    const r = validateOp(g0, { kind: 'seize', charId: 'char:maud', amount: '100' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 3, em);
+    expect(propFx(getNode(g, 'char:maud').props, 'wealth')).toBe(fx('300'));
+    expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('400'));
+    expect(findEdge(g, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(8500); // 6500 + 2000
+    expect(propFx(getNode(g, 'inst:crown').props, 'legitimacy')).toBe(fx('47')); // 50 - 3
+  });
+  it('hold_festival buys calm at amount/8', () => {
+    let g0 = setNodeProp(tier2ish(), 'place:thornfield', 'unrest', fx('40'));
+    const em = makeEmitter(3);
+    const r = validateOp(g0, { kind: 'hold_festival', placeId: 'place:thornfield', amount: '40' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 3, em);
+    expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('260'));
+    expect(propFx(getNode(g, 'place:thornfield').props, 'unrest')).toBe(fx('35')); // 40 - 40/8
+  });
+});
+
+// D14 again, for the tier-2 pack: same mechanism as the launch-op suite
+// above (it.each over cases, deltas replay to the same graph applyOp
+// produced), kept as its own suite because these ops need a different
+// pre-graph (tier2ish(), not g0) -- and pardon needs one further step:
+// imprison actually applied first, since pardon's own precondition is "is
+// imprisoned".
+describe('tier-2 op pack: delta-equivalence (spec D14)', () => {
+  const preImprisoned = (() => {
+    const g = tier2ish();
+    const em = makeEmitter(3);
+    const r = validateOp(g, { kind: 'imprison', charId: 'char:osric' });
+    if (!r.ok) throw new Error(r.error);
+    return applyOp(g, r.op, 3, em);
+  })();
+  const preLevied = setNodeProp(tier2ish(), 'place:thornfield', 'levy', fx('50'));
+
+  const cases: Array<[string, unknown, WorldGraph]> = [
+    ['imprison', { kind: 'imprison', charId: 'char:osric' }, tier2ish()],
+    ['pardon', { kind: 'pardon', charId: 'char:osric' }, preImprisoned],
+    ['raise_levy', { kind: 'raise_levy', placeId: 'place:thornfield', size: '50' }, tier2ish()],
+    ['disband_levy', { kind: 'disband_levy', placeId: 'place:thornfield' }, preLevied],
+    ['send_envoy', { kind: 'send_envoy', charId: 'char:vane', tone: 'threatening' }, tier2ish()],
+    ['seize', { kind: 'seize', charId: 'char:maud', amount: '100' }, tier2ish()],
+    ['hold_festival', { kind: 'hold_festival', placeId: 'place:thornfield', amount: '40' }, tier2ish()],
+  ];
+
+  it.each(cases)('%s: event.deltas replay to the same graph applyOp produced', (_name, op, pre) => {
+    const em = makeEmitter(3);
+    const r = validateOp(pre, op);
+    if (!r.ok) throw new Error(r.error);
+    const post = applyOp(pre, r.op, 3, em);
+    const ev = em.all()[0]!;
+    expect(ev.deltas.length).toBeGreaterThan(0);
+    const replayed = applyDeltas(pre, ev.deltas);
+    expect(hashValue(replayed)).toBe(hashValue(post));
   });
 });

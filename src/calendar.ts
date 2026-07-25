@@ -1,10 +1,12 @@
 // The checkDeck-analog for examiner calendars (carry-over from the Phase 1
 // final review): calendars are authored season data (D21: static, no
 // chance) — this harness catches authoring errors before a season freezes.
-import type { Deck } from './storylet.js';
+import type { Deck, Storylet } from './storylet.js';
 import type { ExaminerCalendar } from './scheduler.js';
 import type { WorldGraph } from './graph.js';
 
+/** entryIndex is -1 for deck-set-level problems not tied to any one
+ *  calendar entry -- currently just a storylet id colliding across decks. */
 export interface CalendarProblem { entryIndex: number; problem: string }
 
 export function validateCalendar(
@@ -13,7 +15,18 @@ export function validateCalendar(
   world: WorldGraph,
 ): CalendarProblem[] {
   const problems: CalendarProblem[] = [];
-  const byId = new Map(decks.flatMap((d) => d.storylets.map((s) => [s.id, s] as const)));
+  // Built by hand, not `new Map(decks.flatMap(...))`: that shortcut is
+  // last-wins on a storylet id colliding across decks, silently shadowing
+  // the earlier deck's storylet (its kind/tier never even get checked). A
+  // duplicate here is reported once per repeat encounter, entryIndex -1
+  // since it isn't tied to any one calendar entry.
+  const byId = new Map<string, Storylet>();
+  for (const deck of decks) {
+    for (const s of deck.storylets) {
+      if (byId.has(s.id)) problems.push({ entryIndex: -1, problem: `duplicate storylet id '${s.id}' across decks` });
+      byId.set(s.id, s);
+    }
+  }
   const armed = new Set<string>();
   calendar.forEach((entry, entryIndex) => {
     const bad = (problem: string) => problems.push({ entryIndex, problem });

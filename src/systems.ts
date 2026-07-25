@@ -128,6 +128,24 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
     em.emit('ledger.skimmed', { deltas, data: { holder: e.src, amount: fxToString(skim) } });
   }
 
+  // 4b. Levy upkeep: militias eat pay every tick; an empty treasury bleeds men instead.
+  for (const place of nodesOfType(g, 'place')) {
+    const levy = place.props['levy'];
+    if (typeof levy !== 'bigint' || levy <= 0n) continue;
+    const upkeep = mulFx(levy, ECON.LEVY_UPKEEP);
+    const treasury = propFx(getNode(g, 'inst:crown').props, 'treasury');
+    if (treasury >= upkeep) {
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: 'inst:crown', key: 'treasury', value: treasury - upkeep }];
+      g = applyDeltas(g, deltas);
+      em.emit('levy.paid', { deltas, data: { placeId: place.id, upkeep: fxToString(upkeep) } });
+    } else {
+      const remaining = mulFx(levy, fx('0.9'));
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: place.id, key: 'levy', value: remaining }];
+      g = applyDeltas(g, deltas);
+      em.emit('levy.deserted', { deltas, data: { placeId: place.id, remaining: fxToString(remaining) } });
+    }
+  }
+
   // 5. Liege tribute (winter).
   if (tick % 4 === 3) {
     for (const debt of edgesFrom(g, 'inst:crown', 'debt')) {

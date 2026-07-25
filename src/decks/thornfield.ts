@@ -18,6 +18,7 @@ export function thornfieldGraph(): WorldGraph {
       population: fx('500'), granary: fx('250'), farmland: fx('180'),
       unrest: fx('20'), dole: fx('0'), taxRateBp: 2000,
       roadsBonusBp: 0, defenseBp: 0, famineStage: 0, famineEndsAt: 0,
+      levy: fx('0'),
     },
   });
   g = addNode(g, { id: 'char:ruler', type: 'character', props: { name: 'the Ruler' } });

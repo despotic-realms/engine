@@ -14,9 +14,9 @@ import { ECON } from './constants.js';
 import { applyDeltas } from './events.js';
 import type { Emitter, GraphDelta } from './events.js';
 import type { Fx } from './fx.js';
-import { fx, fxToString, fxWhole, mulFx } from './fx.js';
+import { clampFx, divFx, fx, fxToString, fxWhole, mulFx, FX_ZERO } from './fx.js';
 import type { NodeType, WorldGraph } from './graph.js';
-import { edgeId, edgesTo, findEdge, getNode, propFx, propStr } from './graph.js';
+import { edgeId, edgesFrom, edgesTo, findEdge, getNode, propFx, propStr } from './graph.js';
 
 export type Op =
   | { kind: 'decree_tax'; placeId: string; rateBp: number }
@@ -25,7 +25,14 @@ export type Op =
   | { kind: 'appoint'; charId: string; officeId: string }
   | { kind: 'audit'; officeId: string }
   | { kind: 'grant'; charId: string; amount: string }
-  | { kind: 'invest'; placeId: string; project: 'irrigation' | 'roads' | 'walls'; amount: string };
+  | { kind: 'invest'; placeId: string; project: 'irrigation' | 'roads' | 'walls'; amount: string }
+  | { kind: 'imprison'; charId: string }
+  | { kind: 'pardon'; charId: string }
+  | { kind: 'raise_levy'; placeId: string; size: string }
+  | { kind: 'disband_levy'; placeId: string }
+  | { kind: 'send_envoy'; charId: string; tone: 'conciliatory' | 'firm' | 'threatening' }
+  | { kind: 'seize'; charId: string; amount: string }
+  | { kind: 'hold_festival'; placeId: string; amount: string };
 
 export interface OpParamDesc {
   name: string;
@@ -84,6 +91,46 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'amount', type: 'fx' },
     ],
   },
+  imprison: {
+    summary: 'Imprison a character: offices vacated, a grudge kindled.',
+    params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+  },
+  pardon: {
+    summary: 'Release an imprisoned character; cools their grudge, warms loyalty.',
+    params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+  },
+  raise_levy: {
+    summary: 'Raise militia at a holding (LEVY_RAISE_COST per unit; upkeep accrues).',
+    params: [
+      { name: 'placeId', type: 'nodeId', nodeType: 'place' },
+      { name: 'size', type: 'fx' },
+    ],
+  },
+  disband_levy: {
+    summary: 'Disband a holding’s levy entirely.',
+    params: [{ name: 'placeId', type: 'nodeId', nodeType: 'place' }],
+  },
+  send_envoy: {
+    summary: 'Send an envoy to a character; tone moves grudge/loyalty deterministically.',
+    params: [
+      { name: 'charId', type: 'nodeId', nodeType: 'character' },
+      { name: 'tone', type: 'enum', values: ['conciliatory', 'firm', 'threatening'] },
+    ],
+  },
+  seize: {
+    summary: 'Seize part of a character’s wealth; kindles a grudge, costs legitimacy.',
+    params: [
+      { name: 'charId', type: 'nodeId', nodeType: 'character' },
+      { name: 'amount', type: 'fx' },
+    ],
+  },
+  hold_festival: {
+    summary: 'Spend treasury on public festivity; unrest eases by amount/8.',
+    params: [
+      { name: 'placeId', type: 'nodeId', nodeType: 'place' },
+      { name: 'amount', type: 'fx' },
+    ],
+  },
 };
 
 export type OpResult = { ok: true; op: Op } | { ok: false; error: string };
@@ -130,6 +177,7 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
   // Referential/resource checks beyond shape. Each branch reads only the
   // graph state its own check needs (treasury, granary, office roster) --
   // decree_tax and appoint need none of it, so they touch nothing here.
+  const t = treasury(g);
   switch (kind as Op['kind']) {
     case 'release_grain': {
       const amount = fx(op['amount'] as string);
@@ -155,6 +203,35 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
       if (g.nodes[projId]) return { ok: false, error: 'that project is already underway' };
       break;
     }
+    case 'imprison': {
+      const c = getNode(g, op['charId'] as string);
+      if ((op['charId'] as string) === propStr(getNode(g, 'inst:crown').props, 'rulerCharId'))
+        return { ok: false, error: 'the crown cannot imprison itself' };
+      if (c.props['imprisoned'] === true) return { ok: false, error: 'already imprisoned' };
+      break;
+    }
+    case 'pardon':
+      if (getNode(g, op['charId'] as string).props['imprisoned'] !== true)
+        return { ok: false, error: 'that character is not imprisoned' };
+      break;
+    case 'raise_levy':
+      if (mulFx(fx(op['size'] as string), ECON.LEVY_RAISE_COST) > t)
+        return { ok: false, error: 'treasury cannot afford that levy' };
+      break;
+    case 'disband_levy':
+      if (propFx(getNode(g, op['placeId'] as string).props, 'levy') <= 0n)
+        return { ok: false, error: 'no levy raised there' };
+      break;
+    case 'seize': {
+      const w = getNode(g, op['charId'] as string).props['wealth'];
+      if (typeof w !== 'bigint') return { ok: false, error: 'that character has no seizable wealth' };
+      if (fx(op['amount'] as string) > w) return { ok: false, error: 'they do not hold that much' };
+      break;
+    }
+    case 'hold_festival':
+      if (fx(op['amount'] as string) < fx('10')) return { ok: false, error: 'a festival needs at least 10' };
+      if (fx(op['amount'] as string) > t) return { ok: false, error: 'treasury cannot afford it' };
+      break;
   }
   return { ok: true, op: op as unknown as Op };
 }
@@ -275,6 +352,119 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.invest', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'imprison': {
+      const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');
+      const gid = edgeId('grudge', op.charId, rulerId);
+      const existingGrudge = g.edges[gid];
+      const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: op.charId, key: 'imprisoned', value: true }];
+      for (const e of edgesFrom(g, op.charId, 'appointment')) deltas.push({ op: 'edge.remove', id: e.id });
+      deltas.push(
+        existingGrudge
+          ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 2500) }
+          : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(2500) } } },
+      );
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.imprison', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'pardon': {
+      const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');
+      const gid = edgeId('grudge', op.charId, rulerId);
+      const lid = edgeId('loyalty', op.charId, rulerId);
+      const existingGrudge = g.edges[gid];
+      const existingLoyalty = g.edges[lid];
+      const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
+      const curLoyalty = typeof existingLoyalty?.props['bp'] === 'number' ? (existingLoyalty.props['bp'] as number) : 5000;
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: op.charId, key: 'imprisoned', value: false }];
+      if (existingGrudge) deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge - 1500) });
+      deltas.push(
+        existingLoyalty
+          ? { op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty + 500) }
+          : { op: 'edge.add', edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5500) } } },
+      );
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.pardon', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'raise_levy': {
+      const size = fx(op.size);
+      const deltas: GraphDelta[] = [
+        debitTreasury(g, mulFx(size, ECON.LEVY_RAISE_COST)),
+        { op: 'node.set', id: op.placeId, key: 'levy', value: propFx(getNode(g, op.placeId).props, 'levy') + size },
+      ];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.raise_levy', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'disband_levy': {
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: op.placeId, key: 'levy', value: FX_ZERO }];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.disband_levy', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'send_envoy': {
+      const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');
+      const gid = edgeId('grudge', op.charId, rulerId);
+      const lid = edgeId('loyalty', op.charId, rulerId);
+      const existingGrudge = g.edges[gid];
+      const existingLoyalty = g.edges[lid];
+      const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
+      const curLoyalty = typeof existingLoyalty?.props['bp'] === 'number' ? (existingLoyalty.props['bp'] as number) : 5000;
+      const deltas: GraphDelta[] = [];
+      if (op.tone === 'conciliatory') {
+        if (existingGrudge) {
+          deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge - 800) });
+        } else {
+          deltas.push(
+            existingLoyalty
+              ? { op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty + 300) }
+              : { op: 'edge.add', edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5300) } } },
+          );
+        }
+      } else if (op.tone === 'threatening') {
+        deltas.push(
+          existingGrudge
+            ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 600) }
+            : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(600) } } },
+        );
+        if (existingLoyalty) deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty - 300) });
+      }
+      // 'firm' changes posture, not state: no deltas, event only.
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.send_envoy', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'seize': {
+      const amount = fx(op.amount);
+      const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');
+      const gid = edgeId('grudge', op.charId, rulerId);
+      const existingGrudge = g.edges[gid];
+      const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
+      const legitimacy = propFx(getNode(g, 'inst:crown').props, 'legitimacy');
+      const deltas: GraphDelta[] = [
+        { op: 'node.set', id: op.charId, key: 'wealth', value: propFx(getNode(g, op.charId).props, 'wealth') - amount },
+        { op: 'node.set', id: 'inst:crown', key: 'treasury', value: treasury(g) + amount },
+        existingGrudge
+          ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 2000) }
+          : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(2000) } } },
+        { op: 'node.set', id: 'inst:crown', key: 'legitimacy', value: clampFx(legitimacy - fx('3'), FX_ZERO, fx('100')) },
+      ];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.seize', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'hold_festival': {
+      const amount = fx(op.amount);
+      const unrest = propFx(getNode(g, op.placeId).props, 'unrest');
+      const deltas: GraphDelta[] = [
+        debitTreasury(g, amount),
+        { op: 'node.set', id: op.placeId, key: 'unrest', value: clampFx(unrest - divFx(amount, fx('8')), FX_ZERO, fx('100')) },
+      ];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.hold_festival', { parents, data: { ...op }, deltas });
       return g2;
     }
   }

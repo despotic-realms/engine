@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { hashValue } from '../src/canon.js';
 import { fx } from '../src/fx.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
-import { edgesTo, findEdge, getNode, setEdgeProp, setNodeProp } from '../src/graph.js';
+import { edgesTo, findEdge, getNode, propFx, setEdgeProp, setNodeProp } from '../src/graph.js';
 import { socialStep } from '../src/systems.js';
 import { applyTransition, checkLadder } from '../src/ladder.js';
 import { thornfieldGraph } from '../src/decks/thornfield.js';
@@ -120,5 +120,27 @@ describe('applyTransition delta-equivalence (spec D14)', () => {
     expect(deltas.length).toBeGreaterThan(0);
     const replayed = applyDeltas(g0, deltas);
     expect(hashValue(replayed)).toBe(hashValue(post));
+  });
+});
+
+describe('TierRule.effects (graft on transition)', () => {
+  it('applies effect deltas on the tier.changed event, skipping already-present adds', () => {
+    const rule: TierRule = {
+      from: 1, to: 2, kind: 'promote', note: 'invitation',
+      when: { nodes: [{ as: 'crown', type: 'institution' }] },
+      effects: [
+        { op: 'node.add', node: { id: 'place:newmarch', type: 'place', props: { name: 'Newmarch' } } },
+        { op: 'node.add', node: { id: 'char:osric', type: 'character', props: { name: 'DUPLICATE' } } }, // exists — skipped
+        { op: 'node.set', id: 'inst:crown', key: 'legitimacy', value: fx('60') },
+      ],
+    };
+    const em = makeEmitter(3);
+    const g = applyTransition(thornfieldGraph(), rule, 3, em);
+    expect(getNode(g, 'place:newmarch').props['name']).toBe('Newmarch');
+    expect(getNode(g, 'char:osric').props['name']).toBe('Osric'); // untouched
+    expect(propFx(getNode(g, 'inst:crown').props, 'legitimacy')).toBe(fx('60'));
+    const ev = em.all().find((e) => e.type === 'tier.changed');
+    expect(ev?.deltas.some((d) => d.op === 'node.add' && d.node.id === 'place:newmarch')).toBe(true);
+    expect(ev?.deltas.some((d) => d.op === 'node.add' && d.node.id === 'char:osric')).toBe(false); // filtered from the event too
   });
 });

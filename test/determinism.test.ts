@@ -72,7 +72,11 @@ describe('determinism', () => {
       expect(seasonHash(starterSeason())).toBe(seasonHash(starterSeason()));
     });
     it('golden: the starter season hash is frozen', () => {
-      expect(seasonHash(starterSeason())).toBe('706bec39df5b679c');
+      // Re-pinned in P2 Task 4: thornfield's place:thornfield node gained a
+      // `levy: fx('0')` prop (the levy-upkeep system's precondition), which
+      // moves the season's content hash. Value re-captured post-change and
+      // confirmed stable across repeated runs; no other golden moved.
+      expect(seasonHash(starterSeason())).toBe('4446b2cdd6a5c5a0');
     });
     it('changes when a storylet is added', () => {
       const extra = {

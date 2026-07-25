@@ -231,3 +231,22 @@ describe('economyStep formula branches (regression pins)', () => {
     expect(em.all().filter((e) => e.type === 'project.matured')).toHaveLength(2);
   });
 });
+
+describe('levy upkeep', () => {
+  it('paid: treasury drops by levy * LEVY_UPKEEP with a delta-carrying event', () => {
+    const g0 = setNodeProp(thornfieldGraph(), 'place:thornfield', 'levy', fx('100'));
+    const em = makeEmitter(1);
+    const g = economyStep(g0, 1, f, em);
+    expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('282')); // 300 - 3 skim - 15 upkeep
+    const ev = em.all().find((e) => e.type === 'levy.paid');
+    expect(ev?.deltas.length).toBeGreaterThan(0);
+  });
+  it('unaffordable: 10% desert instead, treasury untouched by upkeep', () => {
+    let g0 = setNodeProp(thornfieldGraph(), 'place:thornfield', 'levy', fx('100'));
+    g0 = setNodeProp(g0, 'inst:crown', 'treasury', fx('10'));
+    const em = makeEmitter(1);
+    const g = economyStep(g0, 1, f, em);
+    expect(propFx(getNode(g, 'place:thornfield').props, 'levy')).toBe(fx('90'));
+    expect(em.all().some((e) => e.type === 'levy.deserted')).toBe(true);
+  });
+});
