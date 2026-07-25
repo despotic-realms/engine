@@ -38,6 +38,8 @@ export function applyDeltas(g: WorldGraph, ds: GraphDelta[]): WorldGraph {
   return ds.reduce(applyDelta, g);
 }
 
+// One emitter per tick: ids are `t{tick}.{seq}` scoped to this emitter's own
+// call sequence, so two emitters used for the same tick mint colliding ids.
 export interface Emitter {
   emit(type: string, e?: { parents?: string[]; deltas?: GraphDelta[]; data?: Record<string, unknown> }): ChronicleEvent;
   all(): ChronicleEvent[];
@@ -47,15 +49,26 @@ export function makeEmitter(tick: number): Emitter {
   const events: ChronicleEvent[] = [];
   return {
     emit(type, e = {}) {
+      // Copy every caller-supplied container and freeze the record (and each
+      // copy) before it enters the chronicle: the canonical history must not
+      // be retroactively rewritable, either by the caller mutating what they
+      // passed in or by mutating the returned event.
+      const parents = [...(e.parents ?? [])];
+      const deltas = [...(e.deltas ?? [])];
+      const data = { ...(e.data ?? {}) };
       const ev: ChronicleEvent = {
         id: `t${tick}.${events.length}`,
         tick,
         seq: events.length,
         type,
-        parents: e.parents ?? [],
-        deltas: e.deltas ?? [],
-        data: e.data ?? {},
+        parents,
+        deltas,
+        data,
       };
+      Object.freeze(parents);
+      Object.freeze(deltas);
+      Object.freeze(data);
+      Object.freeze(ev);
       events.push(ev);
       return ev;
     },

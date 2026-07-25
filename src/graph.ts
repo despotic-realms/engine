@@ -63,7 +63,7 @@ export function addEdge(
   getNode(g, e.dst);
   const id = edgeId(e.type, e.src, e.dst);
   if (g.edges[id]) throw new Error(`graph: edge '${id}' exists`);
-  return { ...g, edges: { ...g.edges, [id]: { id, ...e } } };
+  return { ...g, edges: { ...g.edges, [id]: { ...e, id } } };
 }
 
 export function findEdge(g: WorldGraph, type: EdgeType, src: NodeId, dst: NodeId): WorldEdge | undefined {
