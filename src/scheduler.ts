@@ -59,8 +59,9 @@ export const examiner: SchedulerPolicy = {
     for (const entry of calendar) {
       if (entry.tick !== tick || entry.storyletId === undefined) continue;
       const hit = pool.find((e) => e.storylet.id === entry.storyletId);
-      if (hit && !chosen.includes(hit) && chosen.length < briefBudget) chosen.push(hit);
-      else if (!hit) skippedProbes.push(entry.storyletId);
+      if (hit && chosen.includes(hit)) continue; // true dedup: already forced this tick, not a failure
+      if (hit && chosen.length < briefBudget) chosen.push(hit);
+      else skippedProbes.push(entry.storyletId); // absent from the pool, or budget already spent -- either way, unobserved
     }
     let remaining = pool.filter((e) => !chosen.includes(e));
     for (let slot = 0; chosen.length < briefBudget && remaining.length > 0; slot++) {

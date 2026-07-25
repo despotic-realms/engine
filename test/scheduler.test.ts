@@ -8,6 +8,24 @@ import { eligibleStorylets } from '../src/storylet.js';
 import { starterDeck } from '../src/decks/starter.js';
 import { thornfieldGraph, thornfieldStressedGraph } from '../src/decks/thornfield.js';
 import type { ExaminerCalendar } from '../src/scheduler.js';
+import type { EligibleEntry, Storylet } from '../src/storylet.js';
+
+// Minimal hand-built brief-kind entries for exercising select()'s budget
+// bookkeeping directly, per its contract (it takes `eligible` as input) --
+// no need to route through eligibleStorylets/a real deck for this.
+function mkBriefEntry(id: string): EligibleEntry {
+  const storylet: Storylet = {
+    id, kind: 'brief', tier: 1, cooldownTicks: 0, once: false,
+    pattern: { nodes: [] },
+    title: id, body: id,
+    options: [
+      { id: 'a', label: 'a', ops: [] },
+      { id: 'b', label: 'b', ops: [] },
+    ],
+    defaultOptionId: 'a',
+  };
+  return { storylet, binding: {} };
+}
 
 const f = makeFortune('scheduler-test-seed');
 const CAL: ExaminerCalendar = [
@@ -30,6 +48,27 @@ describe('examiner', () => {
     const eligible = eligibleStorylets(thornfieldGraph(), [starterDeck], {}, 9, {});
     const sel = examiner.select({ tick: 9, briefBudget: 1, eligible, fortune: f, calendar: CAL });
     expect(sel.skippedProbes).toEqual(['starter.not-in-deck']);
+  });
+  it('records a budget-blocked forced probe in skippedProbes, not just an absent one', () => {
+    const eligible = [mkBriefEntry('probe.one'), mkBriefEntry('probe.two'), mkBriefEntry('probe.three')];
+    const calendar: ExaminerCalendar = [
+      { tick: 4, storyletId: 'probe.one' },
+      { tick: 4, storyletId: 'probe.two' },
+      { tick: 4, storyletId: 'probe.three' },
+    ];
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar });
+    expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one', 'probe.two']);
+    expect(sel.skippedProbes).toEqual(['probe.three']);
+  });
+  it('does not record a true dedup (same probe forced twice) as skipped', () => {
+    const eligible = [mkBriefEntry('probe.one'), mkBriefEntry('probe.two')];
+    const calendar: ExaminerCalendar = [
+      { tick: 4, storyletId: 'probe.one' },
+      { tick: 4, storyletId: 'probe.one' },
+    ];
+    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible, fortune: f, calendar });
+    expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one']);
+    expect(sel.skippedProbes).toEqual([]);
   });
 });
 
