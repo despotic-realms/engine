@@ -75,9 +75,9 @@ export function eligibleStorylets(
   firedOnce: Record<string, true>,
 ): EligibleEntry[] {
   const out: EligibleEntry[] = [];
-  const sortedDecks = [...decks].sort((a, b) => (a.id < b.id ? -1 : 1));
+  const sortedDecks = [...decks].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   for (const deck of sortedDecks) {
-    for (const s of [...deck.storylets].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    for (const s of [...deck.storylets].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
       if (firedOnce[s.id]) continue;
       const last = cooldowns[s.id];
       if (last !== undefined && tick - last < s.cooldownTicks) continue;
@@ -101,7 +101,11 @@ export function checkDeck(deck: Deck, fixtures: readonly WorldGraph[]): DeckProb
       if (!s.options.some((o) => o.id === s.defaultOptionId)) bad(`defaultOptionId '${s.defaultOptionId}' not among options`);
     } else {
       if (s.options.length !== 0) bad('letters carry no options');
-      if (!s.from && !s.fromVar) bad('letters need from or fromVar');
+      if (s.defaultOptionId !== '') bad(`letters need defaultOptionId === '', has '${s.defaultOptionId}'`);
+      const hasFrom = !!s.from;
+      const hasFromVar = !!s.fromVar;
+      if (hasFrom && hasFromVar) bad('letters cannot have both from and fromVar');
+      if (!hasFrom && !hasFromVar) bad('letters need exactly one of from or fromVar');
       if (s.fromVar && !s.pattern.nodes.some((n) => n.as === s.fromVar)) bad(`fromVar '${s.fromVar}' is not a pattern var`);
     }
     const optIds = new Set(s.options.map((o) => o.id));

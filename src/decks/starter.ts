@@ -121,7 +121,7 @@ export const starterDeck: Deck = {
       pattern: {
         nodes: [{ as: 'crown', type: 'institution', where: [{ prop: 'arrears', cmp: 'gt', value: fx('0') }] }],
       },
-      title: 'Under the liege’ seal',
+      title: 'Under the liege’s seal',
       body: 'The tribute is in arrears — {{crown.arrears}} owed. Patience is a courtesy, not a custom.',
       options: [], defaultOptionId: '',
     },

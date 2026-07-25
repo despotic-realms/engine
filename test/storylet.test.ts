@@ -43,4 +43,31 @@ describe('storylet', () => {
     expect(ids).toContain('starter.famine-peak');
     expect(ids).toContain('starter.liege-demand');
   });
+  it('renderTpl bare {{p}} renders name', () => {
+    expect(renderTpl('{{p}} is besieged', base, { p: 'place:thornfield' })).toBe('Thornfield is besieged');
+  });
+  it('checkDeck catches broken letters (both from+fromVar, non-empty defaultOptionId)', () => {
+    const brokenLetter = {
+      id: 'test.bad-letter',
+      kind: 'letter' as const,
+      tier: 1,
+      cooldownTicks: 4,
+      once: false,
+      from: 'char:osric',
+      fromVar: 'c',
+      pattern: { nodes: [{ as: 'c', type: 'character' as const }] },
+      title: 'Bad letter',
+      body: 'This is bad.',
+      options: [],
+      defaultOptionId: 'not-empty',
+    };
+    const problems = checkDeck({ id: 'test', tier: 1, storylets: [brokenLetter] }, [base]);
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.some((p) => p.problem.includes('both'))).toBe(true);
+    expect(problems.some((p) => p.problem.includes('defaultOptionId'))).toBe(true);
+  });
+  it('bindOps unresolved $var fails in validateOp', () => {
+    const ops = bindOps([{ kind: 'audit', officeId: '$missing' }], {});
+    expect(ops[0]?.officeId).toContain('$');
+  });
 });

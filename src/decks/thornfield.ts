@@ -14,6 +14,7 @@ export function thornfieldGraph(): WorldGraph {
   g = addNode(g, {
     id: 'place:thornfield', type: 'place',
     props: {
+      name: 'Thornfield',
       population: fx('500'), granary: fx('180'), farmland: fx('100'),
       unrest: fx('20'), dole: fx('0'), taxRateBp: 2000,
       roadsBonusBp: 0, defenseBp: 0, famineStage: 0, famineEndsAt: 0,
