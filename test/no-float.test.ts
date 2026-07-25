@@ -145,4 +145,15 @@ describe('check-no-float.mjs', () => {
 
     expect(result.status).toBe(0);
   });
+
+  it("treats a variable literally named 'of' as an identifier before real division, not the for-of keyword", () => {
+    fixture(dir, 'of-keyword.ts', ['const of = 4;', 'export const rate = of / 3.14;', ''].join('\n'));
+
+    const result = run(dir);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('of-keyword.ts:2:');
+    expect(result.stderr).toContain('float literal');
+    expect(result.stderr).toContain('outside allowlisted files');
+  });
 });

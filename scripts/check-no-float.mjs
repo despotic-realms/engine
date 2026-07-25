@@ -30,12 +30,16 @@ const BANNED = [
 // Keywords after which a bare '/' starts a regex literal, not division --
 // all contexts where an *expression* is expected next, not contexts where
 // one just ended.
+// Note: 'of' is deliberately excluded even though it introduces the
+// for-of clause -- unlike every other entry here, 'of' is not a reserved
+// word in JS/TS, so it can be an ordinary identifier (`const of = 4`).
+// Treating it as a regex-context keyword misroutes real division right
+// after such a variable into scanRegex.
 const REGEX_CONTEXT_KEYWORDS = new Set([
   'return',
   'typeof',
   'instanceof',
   'in',
-  'of',
   'new',
   'delete',
   'void',
