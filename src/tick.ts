@@ -201,7 +201,7 @@ export function resolveTick(
       : choice.ops ?? [];
     for (const op of ops) {
       const r = validateOp(g, op);
-      if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error } }); continue; }
+      if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
       g = applyOp(g, r.op, tick, em, [decisionEvents.get(choice.briefId)!]);
     }
   }
@@ -220,6 +220,7 @@ export function resolveTick(
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
       const r = validateOp(g, op);
       if (r.ok) g = applyOp(g, r.op, tick, em, [ev.id]);
+      else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
     }
   }
 

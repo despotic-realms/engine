@@ -99,8 +99,9 @@ describe('storylet', () => {
     expect(problems.some((p) => p.problem.includes('defaultOptionId'))).toBe(true);
   });
   it('bindOps unresolved $var fails in validateOp', () => {
-    const ops = bindOps([{ kind: 'audit', officeId: '$missing' }], {});
-    expect(ops[0]?.officeId).toContain('$');
+    const ops = bindOps([{ kind: 'audit' as const, officeId: '$missing' }], {});
+    const opData = ops[0] as { kind: 'audit'; officeId: string } | undefined;
+    expect(opData?.officeId).toContain('$');
     const r = validateOp(base, ops[0]!);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain('$missing');

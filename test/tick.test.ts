@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeFortune } from '../src/fortune.js';
-import { initialState, resolveTick, validateDecisions } from '../src/tick.js';
+import { initialState, resolveTick, validateDecisions, type SeasonConfig } from '../src/tick.js';
 import { starterSeason } from '../src/decks/starter.js';
 
 const season = starterSeason();
@@ -111,5 +111,44 @@ describe('resolveTick', () => {
     const { events } = advance(16);
     expect(events.some((e) => e.type === 'crisis.famine.armed')).toBe(true);
     expect(events.some((e) => e.type === 'famine.starvation')).toBe(true);
+  });
+});
+
+describe('defaulted briefs with failing ops', () => {
+  it('emits op.rejected (via: default) instead of silently skipping', () => {
+    // Build a season whose only storylet's DEFAULT drains grain that an
+    // attended op will already have spent this tick.
+    const drainOption = { id: 'drain', label: 'Drain', ops: [{ kind: 'release_grain' as const, placeId: '$p', amount: '240' }] };
+    const season = starterSeason();
+    const s: SeasonConfig = {
+      ...season,
+      decks: [{
+        id: 'starter', tier: 1,
+        storylets: [
+          {
+            id: 'starter.a', kind: 'brief' as const, tier: 1, cooldownTicks: 1, once: false,
+            pattern: { nodes: [{ as: 'p', type: 'place' as const }] },
+            title: 'A', body: 'A', options: [drainOption, { id: 'skip', label: 'Skip', ops: [] }],
+            defaultOptionId: 'skip',
+          },
+          {
+            id: 'starter.b', kind: 'brief' as const, tier: 1, cooldownTicks: 1, once: false,
+            pattern: { nodes: [{ as: 'p', type: 'place' as const }] },
+            title: 'B', body: 'B', options: [drainOption, { id: 'skip', label: 'Skip', ops: [] }],
+            defaultOptionId: 'drain',   // default that CAN fail
+          },
+        ],
+      }],
+      calendar: [],
+    };
+    const f = makeFortune('default-op-test');
+    let out = resolveTick(s, initialState(s), { seatId: 'seat:throne', choices: [] }, f);
+    // both briefs presented; attend A (drain 240 of 250), neglect B (its default drain fails)
+    const a = out.packet.briefs.find((b) => b.storyletId === 'starter.a')!;
+    out = resolveTick(s, out.state, { seatId: 'seat:throne', choices: [{ briefId: a.briefId, optionId: 'drain' }] }, f);
+    const rejected = out.events.filter((e) => e.type === 'op.rejected');
+    const defaultRejected = rejected.filter((e) => e.data['via'] === 'default');
+    expect(defaultRejected).toHaveLength(1);
+    expect(String(defaultRejected[0]?.data['error'])).toContain('grain');
   });
 });

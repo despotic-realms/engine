@@ -11,6 +11,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "prepare": "pnpm run build",
     "test": "vitest run",
     "check:float": "node scripts/check-no-float.mjs",
     "demo": "pnpm build && node dist/demo.js"
