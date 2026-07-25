@@ -4,3 +4,6 @@ export * from './fortune.js';
 export * from './graph.js';
 export * from './canon.js';
 export * from './events.js';
+export * from './constants.js';
+export * from './ops.js';
+export * from './decks/thornfield.js';

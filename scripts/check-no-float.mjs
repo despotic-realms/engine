@@ -18,7 +18,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const DIVIDE_ALLOW = new Set(['fx.ts', 'fortune.ts', 'storylet.ts']);
+const DIVIDE_ALLOW = new Set(['fx.ts', 'fortune.ts', 'storylet.ts', 'ops.ts']);
 const BANNED = [
   [/\bMath\./, 'Math.* is banned in the core'],
   [/\bparseFloat\b|\bNumber\.parseFloat\b/, 'parseFloat is banned'],
