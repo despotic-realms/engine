@@ -6,4 +6,5 @@ export * from './canon.js';
 export * from './events.js';
 export * from './constants.js';
 export * from './ops.js';
+export * from './match.js';
 export * from './decks/thornfield.js';
