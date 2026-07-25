@@ -106,4 +106,12 @@ describe('storylet', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain('$missing');
   });
+  it('checkDeck rejects a storylet whose tier disagrees with its deck', () => {
+    const wrongTier = {
+      ...starterDeck,
+      storylets: [{ ...starterDeck.storylets[0]!, id: 'starter.wrong-tier', tier: 2 }],
+    };
+    const problems = checkDeck(wrongTier, [base, stressed]);
+    expect(problems.some((p) => p.problem.includes('tier'))).toBe(true);
+  });
 });

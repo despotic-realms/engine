@@ -96,6 +96,7 @@ export function checkDeck(deck: Deck, fixtures: readonly WorldGraph[]): DeckProb
     const bad = (problem: string) => problems.push({ storyletId: s.id, problem });
     if (seen.has(s.id)) bad('duplicate storylet id');
     seen.add(s.id);
+    if (s.tier !== deck.tier) bad(`storylet tier ${s.tier} does not match deck tier ${deck.tier}`);
     if (s.kind === 'brief') {
       if (s.options.length < 2 || s.options.length > 5) bad(`briefs need 2-5 options, has ${s.options.length}`);
       if (!s.options.some((o) => o.id === s.defaultOptionId)) bad(`defaultOptionId '${s.defaultOptionId}' not among options`);
