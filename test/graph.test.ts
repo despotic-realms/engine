@@ -67,9 +67,9 @@ describe('graph', () => {
     g = addNode(g, { id: 'c:foo', type: 'character', props: {} });
     g = addNode(g, { id: 'c:bar', type: 'character', props: {} });
     g = addNode(g, { id: 'p:x', type: 'place', props: {} });
-    g = addEdge(g, { type: 'loyalty', src: 'c:bar', dst: 'p:x', props: {} });
-    g = addEdge(g, { type: 'kinship', src: 'c:foo', dst: 'c:bar', props: {} });
     g = addEdge(g, { type: 'loyalty', src: 'c:foo', dst: 'p:x', props: {} });
+    g = addEdge(g, { type: 'kinship', src: 'c:foo', dst: 'c:bar', props: {} });
+    g = addEdge(g, { type: 'loyalty', src: 'c:bar', dst: 'p:x', props: {} });
     const loyalties = edgesOfType(g, 'loyalty').map((e) => e.id);
     expect(loyalties).toEqual(['loyalty:c:bar->p:x', 'loyalty:c:foo->p:x']);
   });
@@ -77,17 +77,19 @@ describe('graph', () => {
     let g = emptyGraph();
     g = addNode(g, { id: 'c:alice', type: 'character', props: {} });
     g = addNode(g, { id: 'c:bob', type: 'character', props: {} });
+    g = addNode(g, { id: 'c:charlie', type: 'character', props: {} });
     g = addNode(g, { id: 'p:home', type: 'place', props: {} });
+    g = addEdge(g, { type: 'route', src: 'c:charlie', dst: 'p:home', props: {} });
     g = addEdge(g, { type: 'loyalty', src: 'c:bob', dst: 'p:home', props: {} });
-    g = addEdge(g, { type: 'route', src: 'c:alice', dst: 'p:home', props: {} });
-    const toLoyalty = edgesTo(g, 'p:home', 'loyalty');
-    expect(toLoyalty).toHaveLength(1);
-    expect(toLoyalty[0].src).toBe('c:bob');
+    g = addEdge(g, { type: 'loyalty', src: 'c:alice', dst: 'p:home', props: {} });
+    const toHome = edgesTo(g, 'p:home');
+    expect(toHome.map((e) => e.id)).toEqual(['loyalty:c:alice->p:home', 'loyalty:c:bob->p:home', 'route:c:charlie->p:home']);
   });
   it('propInt accepts safe integers, throws on others', () => {
     let g = emptyGraph();
-    g = addNode(g, { id: 'n:test', type: 'character', props: { count: 42, debt: fx('1000'), flag: true } });
+    g = addNode(g, { id: 'n:test', type: 'character', props: { count: 42, frac: 3.5, debt: fx('1000'), flag: true } });
     expect(propInt(getNode(g, 'n:test').props, 'count')).toBe(42);
+    expect(() => propInt(getNode(g, 'n:test').props, 'frac')).toThrow();
     expect(() => propInt(getNode(g, 'n:test').props, 'debt')).toThrow();
     expect(() => propInt(getNode(g, 'n:test').props, 'flag')).toThrow();
   });
