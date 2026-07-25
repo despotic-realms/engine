@@ -16,3 +16,4 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm check:float
       - run: pnpm test
+      - run: pnpm demo
