@@ -37,6 +37,45 @@ describe('validateDecisions', () => {
     expect(validateDecisions(season, state, { seatId: 'seat:throne', choices: [{ briefId: 'b9.9', optionId: 'x' }] }).ok).toBe(false);
     expect(validateDecisions(season, state, { seatId: 'seat:throne', choices: [{ briefId: 'b1.0' }] }).ok).toBe(false);
   });
+  it('rejects a non-string optionId even when ops is also present (resolveTick non-null-assertion crash repro)', () => {
+    const { out } = advance(1);
+    const brief = out.packet.briefs[0]!;
+    const r = validateDecisions(season, out.state, {
+      seatId: 'seat:throne',
+      choices: [{ briefId: brief.briefId, optionId: 42, ops: [] }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe(`choice '${brief.briefId}' needs exactly one of optionId | ops`);
+  });
+  it('rejects a non-string compileRef (canonJson non-integer-number poisoning repro)', () => {
+    const { out } = advance(1);
+    const brief = out.packet.briefs[0]!;
+    const r = validateDecisions(season, out.state, {
+      seatId: 'seat:throne',
+      choices: [{ briefId: brief.briefId, ops: [], compileRef: 1.5 }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe(`choice '${brief.briefId}' compileRef must be a string`);
+  });
+  it('rejects a non-literal via (arbitrary nested object poisoning the chronicle)', () => {
+    const { out } = advance(1);
+    const brief = out.packet.briefs[0]!;
+    const r = validateDecisions(season, out.state, {
+      seatId: 'seat:throne',
+      choices: [{ briefId: brief.briefId, ops: [], via: { x: 1 } }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe(`choice '${brief.briefId}' via must be 'option' or 'directive'`);
+  });
+  it('accepts a well-typed directive choice (ops + via + compileRef all well-typed)', () => {
+    const { out } = advance(1);
+    const brief = out.packet.briefs[0]!;
+    const r = validateDecisions(season, out.state, {
+      seatId: 'seat:throne',
+      choices: [{ briefId: brief.briefId, ops: [], via: 'directive', compileRef: 'compiled:abc123' }],
+    });
+    expect(r.ok).toBe(true);
+  });
 });
 
 describe('resolveTick', () => {

@@ -59,7 +59,12 @@ export function makeEmitter(tick: number): Emitter {
       // Copy every caller-supplied container and freeze the record (and each
       // copy) before it enters the chronicle: the canonical history must not
       // be retroactively rewritable, either by the caller mutating what they
-      // passed in or by mutating the returned event.
+      // passed in or by mutating the returned event. The freeze is SHALLOW:
+      // parents/deltas/data (and the event itself) can't be reassigned or
+      // have keys added/removed, but a delta's `node`/`edge` object and a
+      // data value that happens to be an object are not themselves frozen.
+      // Hosts must treat those nested objects as read-only by convention --
+      // this only guards the outer containers.
       const parents = [...(e.parents ?? [])];
       const deltas = [...(e.deltas ?? [])];
       const data = { ...(e.data ?? {}) };

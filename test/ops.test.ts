@@ -110,6 +110,13 @@ describe('validateOp resource/referential checks (scoped per-arm reads)', () => 
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe('treasury cannot afford it');
   });
+  it('rejects invest into a (place, project) already underway', () => {
+    const em = makeEmitter(3);
+    const g1 = applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '80' }), 3, em);
+    const r = validateOp(g1, { kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '10' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('that project is already underway');
+  });
 });
 
 // D14: chronicle events ARE graph deltas. Every op's emitted event must carry

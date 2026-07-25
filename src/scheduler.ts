@@ -20,7 +20,7 @@ import type { Emitter, GraphDelta } from './events.js';
 import { applyDeltas } from './events.js';
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
-import { propInt } from './graph.js';
+import { nodesOfType, propInt } from './graph.js';
 import type { EligibleEntry } from './storylet.js';
 
 export type ExaminerCalendar = Array<{
@@ -87,19 +87,18 @@ export function advanceArcs(g0: WorldGraph, tick: number, calendar: ExaminerCale
     armedNow.add(placeId);
     em.emit('crisis.famine.armed', { deltas, data: { placeId, durationTicks } });
   }
-  for (const place of Object.keys(g.nodes).sort()) {
-    const node = g.nodes[place];
-    if (!node || node.type !== 'place' || armedNow.has(place)) continue;
+  for (const node of nodesOfType(g, 'place')) {
+    if (armedNow.has(node.id)) continue;
     const stage = propInt(node.props, 'famineStage');
     if (stage === 0) continue;
     if (tick >= propInt(node.props, 'famineEndsAt')) {
-      const deltas: GraphDelta[] = [{ op: 'node.set', id: place, key: 'famineStage', value: 0 }];
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: node.id, key: 'famineStage', value: 0 }];
       g = applyDeltas(g, deltas);
-      em.emit('crisis.famine.ended', { deltas, data: { placeId: place } });
+      em.emit('crisis.famine.ended', { deltas, data: { placeId: node.id } });
     } else {
-      const deltas: GraphDelta[] = [{ op: 'node.set', id: place, key: 'famineStage', value: stage + 1 }];
+      const deltas: GraphDelta[] = [{ op: 'node.set', id: node.id, key: 'famineStage', value: stage + 1 }];
       g = applyDeltas(g, deltas);
-      em.emit('crisis.famine.advanced', { deltas, data: { placeId: place, stage: stage + 1 } });
+      em.emit('crisis.famine.advanced', { deltas, data: { placeId: node.id, stage: stage + 1 } });
     }
   }
   return g;

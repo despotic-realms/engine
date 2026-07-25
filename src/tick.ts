@@ -128,16 +128,30 @@ export function validateDecisions(season: SeasonConfig, state: ReignState, raw: 
     seen.add(briefId);
     const pending = state.pending.find((p) => p.briefId === briefId);
     if (!pending) return { ok: false, error: `no pending brief '${briefId}'` };
-    const hasOption = typeof ch['optionId'] === 'string';
-    const hasOps = Array.isArray(ch['ops']);
+    const via = ch['via'];
+    if (via !== undefined && via !== 'option' && via !== 'directive')
+      return { ok: false, error: `choice '${briefId}' via must be 'option' or 'directive'` };
+    const compileRef = ch['compileRef'];
+    if (compileRef !== undefined && typeof compileRef !== 'string')
+      return { ok: false, error: `choice '${briefId}' compileRef must be a string` };
+    // Presence, not type, decides which arm is "given": this must agree with
+    // resolveTick's own `choice.optionId !== undefined` branch (§3) or a
+    // wrongly-typed optionId slips past here and crashes the non-null
+    // assertion there instead of being rejected at the wire gate.
+    const optionId = ch['optionId'];
+    const ops = ch['ops'];
+    const hasOption = optionId !== undefined;
+    const hasOps = ops !== undefined;
     if (hasOption === hasOps) return { ok: false, error: `choice '${briefId}' needs exactly one of optionId | ops` };
     if (hasOption) {
+      if (typeof optionId !== 'string') return { ok: false, error: `choice '${briefId}' optionId must be a string` };
       const storylet = findStorylet(season, pending.storyletId);
-      if (!storylet.options.some((o) => o.id === ch['optionId']))
-        return { ok: false, error: `unknown option '${String(ch['optionId'])}' on '${briefId}'` };
+      if (!storylet.options.some((o) => o.id === optionId))
+        return { ok: false, error: `unknown option '${String(optionId)}' on '${briefId}'` };
     }
     if (hasOps) {
-      for (const op of ch['ops'] as unknown[]) {
+      if (!Array.isArray(ops)) return { ok: false, error: `choice '${briefId}' ops must be an array` };
+      for (const op of ops as unknown[]) {
         const r = validateOp(state.graph, op);
         if (!r.ok) return { ok: false, error: `bad op on '${briefId}': ${r.error}` };
       }
@@ -256,7 +270,7 @@ export function resolveTick(
 
   // 10. Reports — biased projections, per reporting seat (sorted by seat id).
   const reports: ReportedLedger[] = [...season.reporters]
-    .sort((a, b) => (a.id < b.id ? -1 : 1))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((seat) => {
       const report = compileReport(g, fortune, nextTick, season.primaryPlaceId, seat);
       em.emit('report.issued', { data: { ...report } });
