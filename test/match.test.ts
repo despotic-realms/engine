@@ -41,4 +41,31 @@ describe('matchPattern', () => {
       nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'gt', value: 'oops' }] }],
     })).toEqual([]);
   });
+  it('comparator matrix: all six operators on numeric props', () => {
+    // granary is fx('180'); test boundaries and inclusive/exclusive semantics
+    const equal = fx('180');
+    const below = fx('100');
+    const above = fx('200');
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'eq', value: equal }] }] })).toHaveLength(1); // granary == 180
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'ne', value: equal }] }] })).toHaveLength(0); // granary != 180
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'lt', value: equal }] }] })).toHaveLength(0); // granary < 180
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'le', value: equal }] }] })).toHaveLength(1); // granary <= 180
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'gt', value: equal }] }] })).toHaveLength(0); // granary > 180
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'ge', value: equal }] }] })).toHaveLength(1); // granary >= 180
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'lt', value: above }] }] })).toHaveLength(1); // granary < 200
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'gt', value: below }] }] })).toHaveLength(1); // granary > 100
+  });
+  it('string predicates work with eq/ne', () => {
+    // name is 'Osric'; test string equality
+    expect(matchPattern(g, { nodes: [{ as: 'c', type: 'character', where: [{ prop: 'name', cmp: 'eq', value: 'Osric' }] }] })).toHaveLength(1);
+    expect(matchPattern(g, { nodes: [{ as: 'c', type: 'character', where: [{ prop: 'name', cmp: 'ne', value: 'Osric' }] }] })).toHaveLength(3); // 4 chars - 1 = 3
+  });
+  it('edge-predicate rejection: edge exists but where-clause fails', () => {
+    // maud has grudge to ruler with bp=6500; filter for bp > 9000 → edge exists but predicate fails
+    const m = matchPattern(g, {
+      nodes: [{ as: 'noble', type: 'character' }],
+      edges: [{ type: 'grudge', from: 'noble', to: '#char:ruler', where: [{ prop: 'bp', cmp: 'gt', value: 9000 }] }],
+    });
+    expect(m).toEqual([]);
+  });
 });
