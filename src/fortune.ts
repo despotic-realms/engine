@@ -5,7 +5,7 @@
 const M64 = 0xffff_ffff_ffff_ffffn;
 const FNV_OFFSET = 0xcbf29ce484222325n;
 const FNV_PRIME = 0x0000_0100_0000_01b3n;
-const SEP = '';
+const SEP = '\x1f'; // ASCII unit separator, ensures tuple encoding is injective
 
 export function fnv1a64(s: string): bigint {
   let h = FNV_OFFSET;
@@ -35,8 +35,11 @@ export interface Fortune {
 }
 
 export function makeFortune(masterSeed: string): Fortune {
-  const roll = (stream: string, tick: number, key: string, n = 0): bigint =>
-    mix64(fnv1a64([masterSeed, stream, String(tick), key, String(n)].join(SEP)));
+  const roll = (stream: string, tick: number, key: string, n = 0): bigint => {
+    if (masterSeed.includes(SEP) || stream.includes(SEP) || key.includes(SEP))
+      throw new Error('fortune: field contains reserved separator');
+    return mix64(fnv1a64([masterSeed, stream, String(tick), key, String(n)].join(SEP)));
+  };
   return {
     roll,
     bp: (stream, tick, key, n = 0) => Number(roll(stream, tick, key, n) % 10_000n),

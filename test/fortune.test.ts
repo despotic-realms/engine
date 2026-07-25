@@ -35,9 +35,19 @@ describe('fortune', () => {
     expect(fnv1a64('a')).not.toBe(fnv1a64('b'));
     expect(fnv1a64('')).toBe(0xcbf29ce484222325n);
   });
+  it('tuple encoding is injective', () => {
+    // Collision pair 1: roll('S', 6, 'b1', 0) vs roll('S', 6, 'b', 10)
+    expect(f.roll('S', 6, 'b1', 0)).not.toBe(f.roll('S', 6, 'b', 10));
+    // Collision pair 2: roll('harvest', 6, 'npc:4', 20) vs roll('harvest', 6, 'npc:42', 0)
+    expect(f.roll('harvest', 6, 'npc:4', 20)).not.toBe(f.roll('harvest', 6, 'npc:42', 0));
+  });
+  it('separator guard rejects fields containing separator', () => {
+    expect(() => f.roll('harvest\x1f', 6, 'key')).toThrow();
+    expect(() => f.roll('harvest', 6, 'key\x1f')).toThrow();
+  });
   it('golden: stream values are frozen', () => {
-    expect(f.roll('harvest', 6, 'place:thornfield')).toBe(4094303520962404112n);
-    expect(f.bp('harvest', 6, 'place:thornfield')).toBe(4112);
-    expect(f.int('casting', 1, 'slot', 0, 99)).toBe(61);
+    expect(f.roll('harvest', 6, 'place:thornfield')).toBe(2966403350200152904n);
+    expect(f.bp('harvest', 6, 'place:thornfield')).toBe(2904);
+    expect(f.int('casting', 1, 'slot', 0, 99)).toBe(52);
   });
 });
