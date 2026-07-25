@@ -177,7 +177,11 @@ describe('economyStep formula branches (regression pins)', () => {
   });
 
   it('famine malus: famineStage >= 1 scales the harvest yield to exactly 0.3x of the unfamined draw', () => {
-    const tick = 2;
+    // tick 6 (bp=3866, baseMult=8866) is order-sensitive: folding x0.3 into the multiplier first
+    // (src/systems.ts's actual order) lands on a different floor than folding it into the finished
+    // yield afterward -- tick 2's draw (bp=6310, baseMult=11310) coincidentally agrees under both
+    // orders, so it wouldn't actually catch a fold-order regression. Pin on the draw that would.
+    const tick = 6;
     const bp = f.bp('harvest', tick, 'place:thornfield'); // same draw feeds both scenarios below
     const baseMult = BigInt(5000 + bp);
     // Matches src/systems.ts's actual order: the malus is folded into the weather multiplier
