@@ -42,17 +42,17 @@ describe('matchPattern', () => {
     })).toEqual([]);
   });
   it('comparator matrix: all six operators on numeric props', () => {
-    // granary is fx('180'); test boundaries and inclusive/exclusive semantics
-    const equal = fx('180');
+    // granary is fx('250') (T11 world rebalance); test boundaries and inclusive/exclusive semantics
+    const equal = fx('250');
     const below = fx('100');
-    const above = fx('200');
-    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'eq', value: equal }] }] })).toHaveLength(1); // granary == 180
-    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'ne', value: equal }] }] })).toHaveLength(0); // granary != 180
-    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'lt', value: equal }] }] })).toHaveLength(0); // granary < 180
-    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'le', value: equal }] }] })).toHaveLength(1); // granary <= 180
-    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'gt', value: equal }] }] })).toHaveLength(0); // granary > 180
-    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'ge', value: equal }] }] })).toHaveLength(1); // granary >= 180
-    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'lt', value: above }] }] })).toHaveLength(1); // granary < 200
+    const above = fx('300');
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'eq', value: equal }] }] })).toHaveLength(1); // granary == 250
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'ne', value: equal }] }] })).toHaveLength(0); // granary != 250
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'lt', value: equal }] }] })).toHaveLength(0); // granary < 250
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'le', value: equal }] }] })).toHaveLength(1); // granary <= 250
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'gt', value: equal }] }] })).toHaveLength(0); // granary > 250
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'ge', value: equal }] }] })).toHaveLength(1); // granary >= 250
+    expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'lt', value: above }] }] })).toHaveLength(1); // granary < 300
     expect(matchPattern(g, { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'gt', value: below }] }] })).toHaveLength(1); // granary > 100
   });
   it('string predicates work with eq/ne', () => {

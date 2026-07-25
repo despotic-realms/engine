@@ -11,7 +11,7 @@ const stressed = thornfieldStressedGraph();
 describe('storylet', () => {
   it('renders templates from bindings', () => {
     expect(renderTpl('{{c}} skims {{p.granary}} grain', base, { c: 'char:osric', p: 'place:thornfield' }))
-      .toBe('Osric skims 180 grain');
+      .toBe('Osric skims 250 grain');
   });
   it('binds $var op params from the match', () => {
     const ops = bindOps([{ kind: 'audit', officeId: '$o' }], { o: 'office:steward' });

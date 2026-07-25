@@ -28,8 +28,8 @@ describe('compileReport', () => {
     const b = compileReport(g, f, 5, 'place:thornfield', steward);
     expect(a.granary).toBe(b.granary);
     const reported = fx(a.granary);
-    expect(reported >= fx('174.6')).toBe(true); // 180 * 0.97
-    expect(reported <= fx('185.4')).toBe(true); // 180 * 1.03
+    expect(reported >= fx('242.5')).toBe(true); // 250 * 0.97
+    expect(reported <= fx('257.5')).toBe(true); // 250 * 1.03
   });
   it('a disloyal reporter understates unrest by one bucket', () => {
     let g = setNodeProp(thornfieldGraph(), 'place:thornfield', 'unrest', fx('55')); // restive

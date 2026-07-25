@@ -44,14 +44,14 @@ describe('applyOp', () => {
   it('release_grain moves granary to dole', () => {
     const em = makeEmitter(3);
     const g = applyOp(g0, ok({ kind: 'release_grain', placeId: 'place:thornfield', amount: '20' }), 3, em);
-    expect(propFx(getNode(g, 'place:thornfield').props, 'granary')).toBe(fx('160'));
+    expect(propFx(getNode(g, 'place:thornfield').props, 'granary')).toBe(fx('230'));
     expect(propFx(getNode(g, 'place:thornfield').props, 'dole')).toBe(fx('20'));
   });
   it('stockpile_grain buys grain at GRAIN_PRICE', () => {
     const em = makeEmitter(3);
     const g = applyOp(g0, ok({ kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }), 3, em);
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('280')); // 300 - 40*0.5
-    expect(propFx(getNode(g, 'place:thornfield').props, 'granary')).toBe(fx('220'));
+    expect(propFx(getNode(g, 'place:thornfield').props, 'granary')).toBe(fx('290'));
   });
   it('appoint replaces the office holder', () => {
     const em = makeEmitter(3);
