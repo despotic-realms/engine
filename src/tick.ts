@@ -248,9 +248,9 @@ export function resolveTick(
   const briefs: Brief[] = [];
   sel.chosen.forEach((entry, i) => {
     const briefId = `b${nextTick}.${i}`;
-    const ev = em.emit('brief.presented', { data: { briefId, storyletId: entry.storylet.id, binding: entry.binding, forTick: nextTick } });
-    cooldowns[entry.storylet.id] = nextTick;
-    if (entry.storylet.once) firedOnce[entry.storylet.id] = true;
+    const ev = em.emit('brief.presented', { data: { briefId, storyletId: entry.storylet.id, instanceKey: entry.instanceKey, binding: entry.binding, forTick: nextTick } });
+    cooldowns[entry.instanceKey] = nextTick;
+    if (entry.storylet.once) firedOnce[entry.instanceKey] = true;
     pending.push({ briefId, storyletId: entry.storylet.id, binding: entry.binding, defaultOptionId: entry.storylet.defaultOptionId, presentedEventId: ev.id });
     briefs.push({
       briefId, storyletId: entry.storylet.id,
@@ -264,8 +264,8 @@ export function resolveTick(
   const correspondence: Letter[] = sel.letters.map((entry) => {
     const from = entry.storylet.from ?? entry.binding[entry.storylet.fromVar ?? ''] ?? 'unknown';
     em.emit('letter.sent', { data: { storyletId: entry.storylet.id, from, forTick: nextTick } });
-    cooldowns[entry.storylet.id] = nextTick;
-    if (entry.storylet.once) firedOnce[entry.storylet.id] = true;
+    cooldowns[entry.instanceKey] = nextTick;
+    if (entry.storylet.once) firedOnce[entry.instanceKey] = true;
     return { from, title: renderTpl(entry.storylet.title, g, entry.binding), body: renderTpl(entry.storylet.body, g, entry.binding), storyletId: entry.storylet.id };
   });
 

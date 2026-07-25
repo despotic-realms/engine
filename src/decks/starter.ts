@@ -127,6 +127,33 @@ export const starterDeck: Deck = {
       body: 'The tribute is in arrears — {{crown.arrears}} owed. Patience is a courtesy, not a custom.',
       options: [], defaultOptionId: '',
     },
+    {
+      id: 'starter.gen.petition', kind: 'brief', tier: 1, cooldownTicks: 6, once: false,
+      perBinding: true, maxInstancesPerTick: 1,
+      pattern: {
+        nodes: [{ as: 'c', type: 'character' }],
+        edges: [{ type: 'loyalty', from: 'c', to: '#char:ruler', where: [{ prop: 'bp', cmp: 'lt', value: 5000 }] }],
+      },
+      title: '{{c}} seeks an audience',
+      body: '{{c}} waits in the antechamber with a grievance dressed as a courtesy.',
+      options: [
+        { id: 'hear', label: 'Grant the audience', ops: [] },
+        { id: 'gift', label: 'A small gift instead', ops: [{ kind: 'grant', charId: '$c', amount: '10' }] },
+        { id: 'refuse', label: 'The door stays shut', ops: [] },
+      ],
+      defaultOptionId: 'refuse',
+    },
+    {
+      id: 'starter.gen.rumor-letter', kind: 'letter', tier: 1, cooldownTicks: 8, once: false,
+      perBinding: true, maxInstancesPerTick: 1, fromVar: 'c',
+      pattern: {
+        nodes: [{ as: 'c', type: 'character' }],
+        edges: [{ type: 'grudge', from: 'c', to: '#char:ruler', where: [{ prop: 'bp', cmp: 'gt', value: 3000 }] }],
+      },
+      title: 'A letter of concern from {{c}}',
+      body: '{{c}} writes, with great regret, of the things people are saying.',
+      options: [], defaultOptionId: '',
+    },
   ],
 };
 

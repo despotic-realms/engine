@@ -24,7 +24,7 @@ function mkBriefEntry(id: string): EligibleEntry {
     ],
     defaultOptionId: 'a',
   };
-  return { storylet, binding: {} };
+  return { storylet, binding: {}, instanceKey: id };
 }
 
 const f = makeFortune('scheduler-test-seed');

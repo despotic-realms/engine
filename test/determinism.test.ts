@@ -72,7 +72,7 @@ describe('determinism', () => {
       expect(seasonHash(starterSeason())).toBe(seasonHash(starterSeason()));
     });
     it('golden: the starter season hash is frozen', () => {
-      expect(seasonHash(starterSeason())).toBe('488b74ca002dcd0e');
+      expect(seasonHash(starterSeason())).toBe('706bec39df5b679c');
     });
     it('changes when a storylet is added', () => {
       const extra = {

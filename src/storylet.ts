@@ -31,10 +31,15 @@ export interface Storylet {
   defaultOptionId: string;          // '' for letters
   from?: string;                    // literal sender node id (letters)
   fromVar?: string;                 // or a pattern var naming the sender
+  /** Generator mode (D13 systemic floor): fire one instance per pattern
+   *  binding instead of only the first, each with its own cooldown. */
+  perBinding?: boolean;
+  /** Cap on instances offered per tick for a perBinding storylet (default 2). */
+  maxInstancesPerTick?: number;
 }
 
 export interface Deck { id: string; tier: number; storylets: Storylet[] }
-export interface EligibleEntry { storylet: Storylet; binding: Binding }
+export interface EligibleEntry { storylet: Storylet; binding: Binding; instanceKey: string }
 export interface DeckProblem { storyletId: string; problem: string }
 
 const TPL_RE = /\{\{([a-zA-Z0-9_.:-]+)\}\}/g;
@@ -67,6 +72,10 @@ export function bindOps(ops: readonly OpTpl[], binding: Binding): Op[] {
   });
 }
 
+export function bindingKey(binding: Binding): string {
+  return Object.keys(binding).sort().map((k) => `${k}=${binding[k]}`).join(',');
+}
+
 export function eligibleStorylets(
   g: WorldGraph,
   decks: readonly Deck[],
@@ -78,12 +87,27 @@ export function eligibleStorylets(
   const sortedDecks = [...decks].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   for (const deck of sortedDecks) {
     for (const s of [...deck.storylets].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
-      if (firedOnce[s.id]) continue;
-      const last = cooldowns[s.id];
-      if (last !== undefined && tick - last < s.cooldownTicks) continue;
       const bindings = matchPattern(g, s.pattern);
-      const first = bindings[0];
-      if (first) out.push({ storylet: s, binding: first }); // canonical first binding
+      if (bindings.length === 0) continue;
+      if (s.perBinding === true) {
+        const cap = s.maxInstancesPerTick ?? 2;
+        let taken = 0;
+        for (const binding of bindings) {
+          if (taken >= cap) break;
+          const instanceKey = `${s.id}@${bindingKey(binding)}`;
+          if (firedOnce[instanceKey]) continue;
+          const last = cooldowns[instanceKey];
+          if (last !== undefined && tick - last < s.cooldownTicks) continue;
+          out.push({ storylet: s, binding, instanceKey });
+          taken += 1;
+        }
+      } else {
+        const instanceKey = s.id;
+        if (firedOnce[instanceKey]) continue;
+        const last = cooldowns[instanceKey];
+        if (last !== undefined && tick - last < s.cooldownTicks) continue;
+        out.push({ storylet: s, binding: bindings[0]!, instanceKey });
+      }
     }
   }
   return out;
