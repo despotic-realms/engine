@@ -119,4 +119,30 @@ describe('check-no-float.mjs', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('lines.ts:6:');
   });
+
+  it('does not desync on an apostrophe inside a regex literal, and still catches a float on the next line', () => {
+    fixture(
+      dir,
+      'apostrophe.ts',
+      [`export const APOSTROPHE_RE = /it's a test/;`, 'export const rate = 3.14;', ''].join('\n'),
+    );
+
+    const result = run(dir);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('apostrophe.ts:2:');
+    expect(result.stderr).toContain('float literal');
+  });
+
+  it('handles a character class containing / and a quote inside a regex literal, then passes clean code', () => {
+    fixture(
+      dir,
+      'charclass.ts',
+      [`export const PATH_OR_QUOTE_RE = /[/'"]/;`, 'export const clean = 1n;', ''].join('\n'),
+    );
+
+    const result = run(dir);
+
+    expect(result.status).toBe(0);
+  });
 });

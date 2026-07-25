@@ -8,7 +8,13 @@
 // string-literal contents are blanked -- except `${...}` interpolation
 // bodies inside template literals, which are kept and scanned as code (the
 // scan recurses, so nested strings/templates/comments inside an
-// interpolation are handled too).
+// interpolation are handled too). Regex literals are also blanked like
+// strings: their contents aren't code to scan, and their delimiting `/`
+// characters are not division, so they must not trip the bare-`/` check.
+// Telling a regex literal apart from a division operator in general
+// requires a real parser; we use a preceding-token heuristic instead (see
+// isRegexContext below), which covers the common cases without pretending
+// to be exact.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -21,17 +27,91 @@ const BANNED = [
   [/(?<![\w.])\d+\.\d+/, 'float literal'],
 ];
 
-// Strips comments and blanks string-literal contents from `text`, keeping
-// `${...}` template-interpolation bodies as scannable code. The result is
-// the same length as the input and preserves every newline position, so
-// line numbers computed from it (by splitting on '\n') line up exactly with
-// the original file.
+// Keywords after which a bare '/' starts a regex literal, not division --
+// all contexts where an *expression* is expected next, not contexts where
+// one just ended.
+const REGEX_CONTEXT_KEYWORDS = new Set([
+  'return',
+  'typeof',
+  'instanceof',
+  'in',
+  'of',
+  'new',
+  'delete',
+  'void',
+  'throw',
+  'yield',
+  'case',
+  'do',
+  'else',
+]);
+const WORD_CHAR = /[A-Za-z0-9_$]/;
+
+// Strips comments, blanks string-literal contents, and blanks regex
+// literals from `text`, keeping `${...}` template-interpolation bodies as
+// scannable code. The result is the same length as the input and preserves
+// every newline position, so line numbers computed from it (by splitting on
+// '\n') line up exactly with the original file.
 function sanitize(text) {
   const out = text.split('');
   const n = text.length;
   const blank = (i) => {
     if (out[i] !== '\n') out[i] = ' ';
   };
+
+  // Heuristic: does a '/' at position i start a regex literal? Looks at the
+  // last non-whitespace character already scanned into `out` (so preceding
+  // comments/strings -- already blanked to spaces -- are skipped over). An
+  // identifier, number, ')', or ']' immediately before the slash means an
+  // operand just ended, so it's division; anything else -- an operator,
+  // punctuation, the start of the file, or one of a handful of keywords
+  // that are always followed by an expression -- means an operand is
+  // expected next, so it's a regex literal.
+  function isRegexContext(i) {
+    let j = i - 1;
+    while (j >= 0 && /\s/.test(out[j])) j--;
+    if (j < 0) return true;
+    const c = out[j];
+    if (WORD_CHAR.test(c)) {
+      let k = j;
+      while (k >= 0 && WORD_CHAR.test(out[k])) k--;
+      const word = out.slice(k + 1, j + 1).join('');
+      return REGEX_CONTEXT_KEYWORDS.has(word);
+    }
+    return c !== ')' && c !== ']';
+  }
+
+  // Scans a regex literal starting at the opening '/', honoring [...]
+  // character classes (where '/' doesn't close the regex) and backslash
+  // escapes, then consumes trailing flags. Blanks the whole thing, same as
+  // a string -- it isn't code, and its delimiters aren't division.
+  function scanRegex(i) {
+    blank(i); // opening '/'
+    i++;
+    let inClass = false;
+    while (i < n && text[i] !== '\n' && (text[i] !== '/' || inClass)) {
+      if (text[i] === '\\' && i + 1 < n) {
+        blank(i);
+        i++;
+        blank(i);
+        i++;
+        continue;
+      }
+      if (text[i] === '[') inClass = true;
+      else if (text[i] === ']') inClass = false;
+      blank(i);
+      i++;
+    }
+    if (i < n && text[i] === '/') {
+      blank(i);
+      i++;
+    }
+    while (i < n && /[A-Za-z]/.test(text[i])) {
+      blank(i); // flags: g, i, m, s, u, y, d, ...
+      i++;
+    }
+    return i;
+  }
 
   function scanString(i, quote) {
     blank(i);
@@ -108,6 +188,10 @@ function sanitize(text) {
           blank(i + 1);
           i += 2;
         }
+        continue;
+      }
+      if (c === '/' && isRegexContext(i)) {
+        i = scanRegex(i);
         continue;
       }
       if (c === '"' || c === "'") {
