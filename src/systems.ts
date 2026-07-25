@@ -17,7 +17,7 @@ import type { Emitter, GraphDelta } from './events.js';
 import { clampFx, divFx, fx, fxFromInt, fxToString, mulFx, FX_ZERO } from './fx.js';
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
-import { edgesFrom, edgesTo, getNode, nodesOfType, propFx, propInt, propStr } from './graph.js';
+import { edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, getNode, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
 
 const UNREST_MAX = fx('100');
 
@@ -149,5 +149,61 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
     }
   }
 
+  return g;
+}
+
+// Social drift, decay, and cooling below are continuous background
+// processes with no discrete cause to chronicle -- replay regenerates them
+// by re-running socialStep, not by reading them back from events -- so
+// they mutate the graph directly via the graph.ts helpers and emit
+// nothing (convention lock's continuous-decay exemption). The one
+// exception is the exposed-skimmer grudge kindle: that has a real,
+// discrete cause (the audit that exposed them) worth chronicling, so it
+// follows the same D14 discipline as economyStep above -- built as a
+// GraphDelta[], applied through applyDeltas, and handed to grudge.kindled
+// as its `deltas` (see test/ladder.test.ts's "socialStep delta-
+// equivalence" case).
+export function socialStep(g0: WorldGraph, tick: number, em: Emitter): WorldGraph {
+  let g = g0;
+  const clampBp = (bp: number): number => (bp > 10_000 ? 10_000 : bp < 0 ? 0 : bp);
+
+  // Loyalty relaxes toward neutral (5000bp) by 100bp/tick, clamped so it
+  // lands exactly on 5000 rather than overshooting and oscillating.
+  for (const e of edgesOfType(g, 'loyalty')) {
+    const bp = typeof e.props['bp'] === 'number' ? (e.props['bp'] as number) : 5000;
+    const next = bp < 5000 ? bp + 100 : bp > 5000 ? bp - 100 : bp;
+    const adjusted = (bp < 5000 && next > 5000) || (bp > 5000 && next < 5000) ? 5000 : next;
+    if (adjusted !== bp) g = setEdgeProp(g, e.id, 'bp', clampBp(adjusted));
+  }
+  // Grudges decay by 50bp/tick, floored at 0.
+  for (const e of edgesOfType(g, 'grudge')) {
+    const bp = typeof e.props['bp'] === 'number' ? (e.props['bp'] as number) : 0;
+    if (bp > 0) g = setEdgeProp(g, e.id, 'bp', bp - 50 < 0 ? 0 : bp - 50);
+  }
+  // Exposed skimmers resent their exposure -- once, latched by
+  // grudgeBumped so a second tick of exposure doesn't re-kindle it.
+  const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');
+  for (const e of edgesTo(g, 'inst:crown', 'interest')) {
+    if (e.props['exposed'] !== true || e.props['grudgeBumped'] === true) continue;
+    const existing = findEdge(g, 'grudge', e.src, rulerId);
+    const bp = typeof existing?.props['bp'] === 'number' ? (existing.props['bp'] as number) : 0;
+    const newBp = clampBp(bp + 1500);
+    const deltas: GraphDelta[] = [
+      existing
+        ? { op: 'edge.set', id: existing.id, key: 'bp', value: newBp }
+        : { op: 'edge.add', edge: { id: edgeId('grudge', e.src, rulerId), type: 'grudge', src: e.src, dst: rulerId, props: { bp: newBp } } },
+      { op: 'edge.set', id: e.id, key: 'grudgeBumped', value: true },
+    ];
+    g = applyDeltas(g, deltas);
+    em.emit('grudge.kindled', { deltas, data: { holder: e.src, against: rulerId, cause: 'exposed' } });
+  }
+  // Fed towns cool by 1 unrest per tick.
+  for (const place of nodesOfType(g, 'place')) {
+    const need = mulFx(propFx(place.props, 'population'), ECON.CONSUME_PER_POP);
+    if (propFx(place.props, 'granary') >= need) {
+      const unrest = propFx(getNode(g, place.id).props, 'unrest');
+      g = setNodeProp(g, place.id, 'unrest', clampFx(unrest - fx('1'), FX_ZERO, UNREST_MAX));
+    }
+  }
   return g;
 }
