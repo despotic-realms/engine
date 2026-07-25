@@ -3,7 +3,7 @@
 // ships openly); live-season worlds live in the private content repo.
 import { fx } from '../fx.js';
 import type { WorldGraph } from '../graph.js';
-import { addEdge, addNode, emptyGraph } from '../graph.js';
+import { addEdge, addNode, emptyGraph, setNodeProp } from '../graph.js';
 
 export function thornfieldGraph(): WorldGraph {
   let g = emptyGraph();
@@ -34,5 +34,15 @@ export function thornfieldGraph(): WorldGraph {
   g = addEdge(g, { type: 'loyalty', src: 'char:osric', dst: 'char:ruler', props: { bp: 4200 } });
   g = addEdge(g, { type: 'grudge', src: 'char:maud', dst: 'char:ruler', props: { bp: 6500 } });
   g = addEdge(g, { type: 'debt', src: 'inst:crown', dst: 'char:liege', props: { duePerYear: fx('120') } });
+  return g;
+}
+
+/** The same holding under strain: unrest high, granary thin, famine biting, liege unpaid. */
+export function thornfieldStressedGraph(): WorldGraph {
+  let g = thornfieldGraph();
+  g = setNodeProp(g, 'place:thornfield', 'unrest', fx('55'));
+  g = setNodeProp(g, 'place:thornfield', 'granary', fx('60'));
+  g = setNodeProp(g, 'place:thornfield', 'famineStage', 2);
+  g = setNodeProp(g, 'inst:crown', 'arrears', fx('120'));
   return g;
 }
