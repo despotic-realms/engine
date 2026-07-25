@@ -143,4 +143,36 @@ describe('TierRule.effects (graft on transition)', () => {
     expect(ev?.deltas.some((d) => d.op === 'node.add' && d.node.id === 'place:newmarch')).toBe(true);
     expect(ev?.deltas.some((d) => d.op === 'node.add' && d.node.id === 'char:osric')).toBe(false); // filtered from the event too
   });
+
+  // Fast-follow from review: the test above only exercises effects on a
+  // 'promote' rule, which never runs the demote-to-0 vacate branch --
+  // leaving the compose-after-demote path (vacate/inExile deltas, then
+  // effects appended) unpinned. src is untouched here: applyTransition's
+  // effects loop already runs unconditionally after the demote-to-0 `if`,
+  // regardless of which branch fired -- confirmed by reading src/ladder.ts,
+  // not discovered by a failing run.
+  it('composes after a demote-to-0 vacate: vacate/inExile deltas and the graft node.add all land on one tier.changed event, in append order', () => {
+    const rule: TierRule = {
+      from: 1, to: 0, kind: 'demote', note: 'coup',
+      when: { nodes: [{ as: 'crown', type: 'institution' }] },
+      effects: [
+        { op: 'node.add', node: { id: 'place:exile-camp', type: 'place', props: { name: 'Exile Camp' } } },
+      ],
+    };
+    const em = makeEmitter(3);
+    const g = applyTransition(thornfieldGraph(), rule, 3, em);
+    expect(edgesTo(g, 'office:steward', 'appointment')).toHaveLength(0);
+    expect(getNode(g, 'inst:crown').props['inExile']).toBe(true);
+    expect(getNode(g, 'place:exile-camp').props['name']).toBe('Exile Camp');
+    const events = em.all();
+    expect(events).toHaveLength(1);
+    const ev = events[0]!;
+    expect(ev.type).toBe('tier.changed');
+    const removeIdx = ev.deltas.findIndex((d) => d.op === 'edge.remove');
+    const inExileIdx = ev.deltas.findIndex((d) => d.op === 'node.set' && d.id === 'inst:crown' && d.key === 'inExile');
+    const graftIdx = ev.deltas.findIndex((d) => d.op === 'node.add' && d.node.id === 'place:exile-camp');
+    expect(removeIdx).toBeGreaterThanOrEqual(0);
+    expect(inExileIdx).toBeGreaterThan(removeIdx);
+    expect(graftIdx).toBeGreaterThan(inExileIdx); // effects compose AFTER the demote-vacate logic, observable in delta order
+  });
 });

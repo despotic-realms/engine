@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { hashValue } from '../src/canon.js';
 import { fx, fxToString } from '../src/fx.js';
-import { addNode, edgeId, findEdge, getNode, propFx, propInt, removeEdge, setNodeProp } from '../src/graph.js';
+import { addEdge, addNode, edgeId, findEdge, getNode, propFx, propInt, removeEdge, setNodeProp } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
 import { applyOp, validateOp } from '../src/ops.js';
@@ -288,5 +288,91 @@ describe('tier-2 op pack: delta-equivalence (spec D14)', () => {
     expect(ev.deltas.length).toBeGreaterThan(0);
     const replayed = applyDeltas(pre, ev.deltas);
     expect(hashValue(replayed)).toBe(hashValue(post));
+  });
+});
+
+// Fast-follow from review: the suites above pin one side of several
+// create-vs-update branch pairs (e.g. imprison's grudge kindle only ever
+// hit the "no prior edge, create" path; pardon's loyalty warmth only ever
+// hit the "prior edge, update" path). These pin the other side of each
+// pair, plus the two branches that had no apply-behavior test at all
+// ('firm' and disband_levy's actual post-value). Regression pins on
+// already-shipped, already-verified behavior -- src is untouched by this
+// addition; every value below was hand-traced against src/ops.ts before
+// being written, not discovered by a failing run.
+describe('tier-2 op pack: both sides of every branch (regression pins)', () => {
+  it('imprison updates an existing grudge via clampBp(cur+2500), not a fresh edge', () => {
+    const g0 = tier2ish(); // maud already carries a grudge->ruler at 6500
+    const em = makeEmitter(3);
+    const r = validateOp(g0, { kind: 'imprison', charId: 'char:maud' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 3, em);
+    expect(findEdge(g, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(9000); // 6500 + 2500, edge.set
+  });
+  it('pardon creates a loyalty edge from scratch when none exists (clampBp(5500))', () => {
+    let g0 = tier2ish(); // maud has no loyalty edge to ruler at all
+    const em0 = makeEmitter(3);
+    const r0 = validateOp(g0, { kind: 'imprison', charId: 'char:maud' });
+    if (!r0.ok) throw new Error(r0.error);
+    g0 = applyOp(g0, r0.op, 3, em0);
+    const em = makeEmitter(4);
+    const r = validateOp(g0, { kind: 'pardon', charId: 'char:maud' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 4, em);
+    expect(findEdge(g, 'loyalty', 'char:maud', 'char:ruler')?.props['bp']).toBe(5500); // created
+    expect(findEdge(g, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(7500); // 9000 - 1500, bonus check
+  });
+  it('send_envoy conciliatory with no grudge: warms existing loyalty, or creates it at 5300 if none', () => {
+    const g0 = tier2ish();
+    const em = makeEmitter(3);
+    // osric: no grudge to ruler, but a pre-existing loyalty edge (4200) -> update
+    const ro = validateOp(g0, { kind: 'send_envoy', charId: 'char:osric', tone: 'conciliatory' });
+    if (!ro.ok) throw new Error(ro.error);
+    const go = applyOp(g0, ro.op, 3, em);
+    expect(findEdge(go, 'loyalty', 'char:osric', 'char:ruler')?.props['bp']).toBe(4500); // 4200 + 300
+    // vane: no grudge, no loyalty at all -> created at 5300
+    const rv = validateOp(g0, { kind: 'send_envoy', charId: 'char:vane', tone: 'conciliatory' });
+    if (!rv.ok) throw new Error(rv.error);
+    const gv = applyOp(g0, rv.op, 3, em);
+    expect(findEdge(gv, 'loyalty', 'char:vane', 'char:ruler')?.props['bp']).toBe(5300);
+  });
+  it('send_envoy threatening touches both an existing grudge (+600) and an existing loyalty (-300) from one fixture', () => {
+    let g0 = tier2ish();
+    g0 = addEdge(g0, { type: 'grudge', src: 'char:osric', dst: 'char:ruler', props: { bp: 1000 } }); // osric already has loyalty 4200
+    const em = makeEmitter(3);
+    const r = validateOp(g0, { kind: 'send_envoy', charId: 'char:osric', tone: 'threatening' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 3, em);
+    expect(findEdge(g, 'grudge', 'char:osric', 'char:ruler')?.props['bp']).toBe(1600); // 1000 + 600, edge.set
+    expect(findEdge(g, 'loyalty', 'char:osric', 'char:ruler')?.props['bp']).toBe(3900); // 4200 - 300
+  });
+  it("send_envoy 'firm' is the zero-delta contract: validates ok, applies to a bit-identical graph", () => {
+    const g0 = tier2ish(); // maud carries pre-existing edges -- firm must still touch none of them
+    expect(validateOp(g0, { kind: 'send_envoy', charId: 'char:maud', tone: 'firm' }).ok).toBe(true);
+    const em = makeEmitter(3);
+    const r = validateOp(g0, { kind: 'send_envoy', charId: 'char:maud', tone: 'firm' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(g0, r.op, 3, em);
+    const ev = em.all()[0]!;
+    expect(ev.deltas.length).toBe(0);
+    expect(hashValue(g)).toBe(hashValue(g0));
+  });
+  it("disband_levy zeroes the levy prop exactly (fx('0')) after a raise", () => {
+    const g0 = tier2ish();
+    const em1 = makeEmitter(3);
+    const r1 = validateOp(g0, { kind: 'raise_levy', placeId: 'place:thornfield', size: '50' });
+    if (!r1.ok) throw new Error(r1.error);
+    const g1 = applyOp(g0, r1.op, 3, em1);
+    const em2 = makeEmitter(4);
+    const r2 = validateOp(g1, { kind: 'disband_levy', placeId: 'place:thornfield' });
+    if (!r2.ok) throw new Error(r2.error);
+    const g2 = applyOp(g1, r2.op, 4, em2);
+    expect(propFx(getNode(g2, 'place:thornfield').props, 'levy')).toBe(fx('0'));
+  });
+  it('hold_festival rejects when treasury cannot afford it', () => {
+    const g0 = tier2ish(); // treasury 300
+    const r = validateOp(g0, { kind: 'hold_festival', placeId: 'place:thornfield', amount: '350' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('treasury cannot afford it');
   });
 });
