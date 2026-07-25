@@ -5,6 +5,8 @@
 // demos, tests, and self-hosts end-to-end.
 import { fx } from '../fx.js';
 import type { Deck } from '../storylet.js';
+import type { SeasonConfig } from '../tick.js';
+import { thornfieldGraph } from './thornfield.js';
 
 export const starterDeck: Deck = {
   id: 'starter',
@@ -127,3 +129,39 @@ export const starterDeck: Deck = {
     },
   ],
 };
+
+export function starterSeason(): SeasonConfig {
+  return {
+    seasonId: 'season-0-starter',
+    startTier: 1,
+    initialGraph: thornfieldGraph(),
+    decks: [starterDeck],
+    tiers: {
+      0: { deckIds: [], briefBudget: 0, attentionSlots: 1 },
+      1: { deckIds: ['starter'], briefBudget: 2, attentionSlots: 2 },
+      2: { deckIds: ['starter'], briefBudget: 3, attentionSlots: 3 },
+    },
+    calendar: [
+      { tick: 4, storyletId: 'starter.audit-whisper' },
+      { tick: 4, armFamine: { placeId: 'place:thornfield', durationTicks: 4 } },
+    ],
+    tierRules: [
+      {
+        from: 1, to: 0, kind: 'demote', note: 'coup',
+        when: { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'unrest', cmp: 'ge', value: fx('80') }] }] },
+      },
+      {
+        from: 1, to: 2, kind: 'promote', note: 'invitation',
+        when: {
+          nodes: [{
+            as: 'crown', type: 'institution',
+            where: [{ prop: 'treasury', cmp: 'ge', value: fx('500') }, { prop: 'legitimacy', cmp: 'ge', value: fx('75') }],
+          }],
+        },
+      },
+    ],
+    throne: { id: 'seat:throne', kind: 'throne', bodyCharId: 'char:ruler', attentionSlots: 2, fidelity: 'external' },
+    reporters: [{ id: 'seat:steward', kind: 'office', bodyCharId: 'char:osric', officeId: 'office:steward', attentionSlots: 1, fidelity: 'npc' }],
+    primaryPlaceId: 'place:thornfield',
+  };
+}

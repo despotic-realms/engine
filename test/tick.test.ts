@@ -1,0 +1,76 @@
+import { describe, expect, it } from 'vitest';
+import { makeFortune } from '../src/fortune.js';
+import { initialState, resolveTick, validateDecisions } from '../src/tick.js';
+import { starterSeason } from '../src/decks/starter.js';
+
+const season = starterSeason();
+const f = makeFortune('tick-test-seed');
+const empty = { seatId: 'seat:throne', choices: [] };
+
+function advance(n: number) {
+  let state = initialState(season);
+  let out = resolveTick(season, state, empty, f);
+  const packets = [out.packet];
+  const events = [...out.events];
+  for (let i = 1; i < n; i++) {
+    out = resolveTick(season, out.state, empty, f);
+    packets.push(out.packet);
+    events.push(...out.events);
+  }
+  return { out, packets, events };
+}
+
+describe('validateDecisions', () => {
+  it('rejects a journal key anywhere (D16)', () => {
+    const state = initialState(season);
+    const top = validateDecisions(season, state, { seatId: 'seat:throne', choices: [], journal: 'my secret plan' });
+    expect(top.ok).toBe(false);
+    if (!top.ok) expect(top.error).toContain('D16');
+    const nested = validateDecisions(season, state, {
+      seatId: 'seat:throne',
+      choices: [{ briefId: 'b1.0', optionId: 'hold', journal: 'x' }],
+    });
+    expect(nested.ok).toBe(false);
+  });
+  it('rejects unknown briefs, unknown options, and op/option ambiguity', () => {
+    const state = initialState(season);
+    expect(validateDecisions(season, state, { seatId: 'seat:throne', choices: [{ briefId: 'b9.9', optionId: 'x' }] }).ok).toBe(false);
+    expect(validateDecisions(season, state, { seatId: 'seat:throne', choices: [{ briefId: 'b1.0' }] }).ok).toBe(false);
+  });
+});
+
+describe('resolveTick', () => {
+  it('presents briefs, reports, and letters in the packet', () => {
+    const { packets } = advance(2);
+    const p = packets[1]!;
+    expect(p.tick).toBe(2);
+    expect(p.briefs.length).toBeGreaterThan(0);
+    expect(p.briefs[0]!.options.length).toBeGreaterThanOrEqual(2);
+    expect(p.reports).toHaveLength(1);
+    expect(p.attentionSlots).toBe(2);
+  });
+  it('applies a chosen option and chronicles the causal chain', () => {
+    const { out } = advance(1);
+    const brief = out.packet.briefs[0]!;
+    const choice = { seatId: 'seat:throne', choices: [{ briefId: brief.briefId, optionId: brief.options[0]!.id }] };
+    const r = validateDecisions(season, out.state, choice);
+    expect(r.ok).toBe(true);
+    const next = resolveTick(season, out.state, choice, f);
+    const decision = next.events.find((e) => e.type === 'decision.recorded');
+    expect(decision).toBeDefined();
+    const opEvents = next.events.filter((e) => e.type.startsWith('op.'));
+    for (const ev of opEvents) expect(ev.parents).toContain(decision!.id);
+  });
+  it('defaults unattended briefs and records neglect over the attention cut', () => {
+    const { out } = advance(1);
+    if (out.packet.briefs.length > 0) {
+      const next = resolveTick(season, out.state, empty, f);
+      expect(next.events.some((e) => e.type === 'brief.defaulted')).toBe(true);
+    }
+  });
+  it('the famine calendar bites: starvation appears within 16 ticks', () => {
+    const { events } = advance(16);
+    expect(events.some((e) => e.type === 'crisis.famine.armed')).toBe(true);
+    expect(events.some((e) => e.type === 'famine.starvation')).toBe(true);
+  });
+});
