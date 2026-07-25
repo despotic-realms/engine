@@ -3,7 +3,7 @@ import { hashValue } from '../src/canon.js';
 import { fx } from '../src/fx.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
 import { makeFortune } from '../src/fortune.js';
-import { getNode, propFx, setNodeProp, addNode } from '../src/graph.js';
+import { getNode, propFx, propInt, setNodeProp, addNode } from '../src/graph.js';
 import { economyStep } from '../src/systems.js';
 import { thornfieldGraph } from '../src/decks/thornfield.js';
 
@@ -140,5 +140,90 @@ describe('granary.consumed', () => {
     expect(ev).toBeDefined();
     expect(ev?.data['placeId']).toBe('place:thornfield');
     expect(ev?.deltas.length).toBeGreaterThan(0);
+  });
+});
+
+// Regression pins for formula branches the suite above exercises only
+// incidentally, or not at all: roads income scaling, the over-2500bp
+// tax-rate unrest sting, the famine yield malus, and non-irrigation project
+// maturity. These pin already-correct, already-reviewed behavior (values
+// verified by hand below) -- there is no RED step here, since nothing in
+// src/systems.ts changed for this round.
+describe('economyStep formula branches (regression pins)', () => {
+  it('roads bonus scales treasury harvest income by exactly 1.05x', () => {
+    const g0 = setNodeProp(thornfieldGraph(), 'place:thornfield', 'roadsBonusBp', 500);
+    const em = makeEmitter(2);
+    const g = economyStep(g0, 2, f, em);
+    // exact math cross-check using the same draw the engine used (mirrors the
+    // "autumn" test above, extended with the roads income factor)
+    const bp = f.bp('harvest', 2, 'place:thornfield');
+    const yieldFx = (fx('180') * fx('2.4') / 10_000n) * BigInt(5000 + bp) / 10_000n;
+    const taxGrain = yieldFx * 2000n / 10_000n; // taxRateBp 2000 (default; unaffected by roadsBonusBp)
+    const income = (taxGrain * fx('0.5') / 10_000n) * 10_500n / 10_000n; // GRAIN_PRICE 0.5, x(10_000+500bp)/10_000 = x1.05
+    const treasury = propFx(getNode(g, 'inst:crown').props, 'treasury');
+    expect(treasury).toBe(fx('300') + income - fx('3')); // start 300, + harvest income, - skim 3
+  });
+
+  it('tax sting: taxRateBp above 2500bp raises unrest by exactly the sting formula', () => {
+    const g0 = setNodeProp(thornfieldGraph(), 'place:thornfield', 'taxRateBp', 4000);
+    const preUnrest = propFx(getNode(g0, 'place:thornfield').props, 'unrest'); // fx('20'), nowhere near the [0,100] clamp
+    const em = makeEmitter(2);
+    const g = economyStep(g0, 2, f, em);
+    const unrest = propFx(getNode(g, 'place:thornfield').props, 'unrest');
+    // divFx(fxFromInt(4000-2500), fx('100')) = fx('15'). Consumption doesn't touch unrest here:
+    // even taxed at 40% the harvest leaves the granary far above the population's need, so no
+    // dole/famine event fires to confound the sting-only delta.
+    expect(unrest).toBe(preUnrest + fx('15'));
+  });
+
+  it('famine malus: famineStage >= 1 scales the harvest yield to exactly 0.3x of the unfamined draw', () => {
+    const tick = 2;
+    const bp = f.bp('harvest', tick, 'place:thornfield'); // same draw feeds both scenarios below
+    const baseMult = BigInt(5000 + bp);
+    // Matches src/systems.ts's actual order: the malus is folded into the weather multiplier
+    // BEFORE that multiplier is multiplied into the yield -- not applied to the unfamined yield
+    // afterward. Floor-rounding at fixed scale is not associative across two chained
+    // multiplications (folding x0.3 in early vs. late can land on different floors), so this
+    // replicates the implementation's actual order to get a bit-exact expectation, not a
+    // merely-close one.
+    const maluseldMult = baseMult * fx('0.3') / 10_000n;
+    const yieldUnfamined = (fx('180') * fx('2.4') / 10_000n) * baseMult / 10_000n;
+    const yieldFamined = (fx('180') * fx('2.4') / 10_000n) * maluseldMult / 10_000n;
+
+    const emBase = makeEmitter(tick);
+    const gUnfamined = economyStep(thornfieldGraph(), tick, f, emBase);
+    const evUnfamined = emBase.all().find((e) => e.type === 'harvest.reaped');
+    expect(fx(evUnfamined?.data['yield'] as string)).toBe(yieldUnfamined);
+
+    const faminedStart = setNodeProp(thornfieldGraph(), 'place:thornfield', 'famineStage', 1);
+    const emFamine = makeEmitter(tick);
+    const gFamined = economyStep(faminedStart, tick, f, emFamine);
+    const evFamined = emFamine.all().find((e) => e.type === 'harvest.reaped');
+    expect(fx(evFamined?.data['yield'] as string)).toBe(yieldFamined);
+
+    // Granary deltas: net grain added by the harvest (yield minus 20% tax) on top of the shared
+    // fx('250') starting granary and fx('100') baseline consumption -- no shortfall in either case.
+    const netUnfamined = yieldUnfamined - (yieldUnfamined * 2000n / 10_000n);
+    const netFamined = yieldFamined - (yieldFamined * 2000n / 10_000n);
+    expect(propFx(getNode(gUnfamined, 'place:thornfield').props, 'granary')).toBe(fx('250') + netUnfamined - fx('100'));
+    expect(propFx(getNode(gFamined, 'place:thornfield').props, 'granary')).toBe(fx('250') + netFamined - fx('100'));
+  });
+
+  it('roads and walls projects mature together: roadsBonusBp +500, defenseBp +1500, both matured', () => {
+    let g0 = addNode(thornfieldGraph(), {
+      id: 'proj:roads:place:thornfield', type: 'project',
+      props: { placeId: 'place:thornfield', project: 'roads', amount: fx('80'), maturesAt: 11, matured: false, causeEventId: 't3.0' },
+    });
+    g0 = addNode(g0, {
+      id: 'proj:walls:place:thornfield', type: 'project',
+      props: { placeId: 'place:thornfield', project: 'walls', amount: fx('80'), maturesAt: 11, matured: false, causeEventId: 't3.1' },
+    });
+    const em = makeEmitter(11);
+    const g = economyStep(g0, 11, f, em);
+    expect(propInt(getNode(g, 'place:thornfield').props, 'roadsBonusBp')).toBe(500); // 0 + 500
+    expect(propInt(getNode(g, 'place:thornfield').props, 'defenseBp')).toBe(1500);   // 0 + 1500
+    expect(getNode(g, 'proj:roads:place:thornfield').props['matured']).toBe(true);
+    expect(getNode(g, 'proj:walls:place:thornfield').props['matured']).toBe(true);
+    expect(em.all().filter((e) => e.type === 'project.matured')).toHaveLength(2);
   });
 });
