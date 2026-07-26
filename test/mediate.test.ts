@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { applyMediatedOp } from '../src/mediate.js';
+import { applyMediatedOp, willingnessOf } from '../src/mediate.js';
 import { makeFortune } from '../src/fortune.js';
+import type { Fortune } from '../src/fortune.js';
+import { drawBand } from '../src/bands.js';
+import { aptOf } from '../src/spine.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
-import { addEdge, addNode, emptyGraph, getNode, propFx } from '../src/graph.js';
+import { addEdge, addNode, emptyGraph, getNode, propFx, setNodeProp } from '../src/graph.js';
 import { fx } from '../src/fx.js';
-import { hashValue } from '../src/canon.js';
+import { canonJson, hashValue } from '../src/canon.js';
 import { initialState, resolveTick, type SeasonConfig } from '../src/tick.js';
 import { starterSeason } from '../src/decks/starter.js';
 
@@ -233,5 +236,205 @@ describe('mediated execution: band-scaled ops re-validate against the unscaled c
       }
     }
     throw new Error('no poor draw in 50 seeds — widen scan');
+  });
+});
+
+// Task 4 (spec §3.5): willingness -- fortune-free by design. Whether the
+// executor TRIES is character (deterministic, no dice, no Fortune
+// parameter on willingnessOf's signature at all); how it LANDS is the
+// world (the band draw, covered above). These four are the brief's exact
+// scoring cases, turned into real tests against real constructed worlds.
+describe('willingness (spec §3.5 — deterministic, no dice)', () => {
+  // score = loyalty bp (default 5000 when no edge)
+  //   +500 if OP domain matches the executor's current want's domain affinity
+  //   (want 'coin'|'holding' -> econ; 'office'|'recognition' -> social; 'revenge' -> martial; else none)
+  //   -2000 if op is imprison/seize targeting a character the executor holds a
+  //     loyalty OR kinship edge toward ("asked to strike their own")
+  //   vengeful executor + any grudge edge executor->target: refuses outright
+  //   craven executor + martial domain: result is capped at 'drags'
+  // thresholds: >=5500 complies; >=4000 drags; else refuses
+  it('loyal steward complies; disloyal refuses; middle drags', () => {
+    const g0 = world(5000); // aptitude is irrelevant to willingness; econ op, no target
+    const op = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 1000 } as const;
+
+    const loyal = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 6000 } });
+    expect(willingnessOf(loyal, 'char:st', op, 'char:ruler')).toBe('complies'); // 6000 >= 5500
+
+    const disloyal = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 2000 } });
+    expect(willingnessOf(disloyal, 'char:st', op, 'char:ruler')).toBe('refuses'); // 2000 < 4000
+
+    const middling = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 4500 } });
+    expect(willingnessOf(middling, 'char:st', op, 'char:ruler')).toBe('drags'); // 4000 <= 4500 < 5500
+  });
+
+  it('want-alignment bonus flips a 5200 to complies', () => {
+    let g0 = world(5000);
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 5200 } });
+    const op = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 1000 } as const; // domain econ
+
+    expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('drags'); // 5200, no want set yet
+
+    g0 = setNodeProp(g0, 'char:st', 'wantChain', ['coin']); // coin -> econ affinity
+    g0 = setNodeProp(g0, 'char:st', 'wantIndex', 0);
+    expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('complies'); // 5200 + 500 = 5700
+  });
+
+  it('strike-their-own penalty forces refusal and emits op.refused with reason', () => {
+    let g0 = world(9000); // the econ steward is irrelevant here -- this op is martial
+    g0 = addNode(g0, { id: 'char:mar', type: 'character', props: { name: 'Marshal', 'apt:martial': 9000 } });
+    g0 = addNode(g0, { id: 'office:marshal', type: 'office', props: { title: 'Marshal' } });
+    g0 = addEdge(g0, { type: 'appointment', src: 'char:mar', dst: 'office:marshal', props: { since: 0 } });
+    g0 = addNode(g0, { id: 'char:kin', type: 'character', props: { name: 'Kin' } });
+    g0 = addEdge(g0, { type: 'kinship', src: 'char:mar', dst: 'char:kin', props: {} }); // the marshal's own blood
+    // No loyalty edge char:mar -> char:ruler at all: default score 5000, then
+    // -2000 for "asked to strike their own" (imprison + kinship to target) = 3000 < 4000.
+    const op = { kind: 'imprison', charId: 'char:kin' } as const;
+    expect(willingnessOf(g0, 'char:mar', op, 'char:ruler')).toBe('refuses');
+
+    const em = makeEmitter(6);
+    const g2 = applyMediatedOp(g0, op, 6, makeFortune('strike-own'), em, { ...MED, willingness: true }, []);
+    expect(g2).toBe(g0); // nothing else happens: graph unchanged
+    expect(em.all().some((e) => e.type === 'op.executed')).toBe(false);
+    expect(em.all().some((e) => e.type === 'op.imprison')).toBe(false);
+    const refused = em.all().find((e) => e.type === 'op.refused');
+    expect(refused).toBeDefined();
+    expect(refused!.data).toEqual({ opKind: 'imprison', executorId: 'char:mar', reason: 'disloyal' });
+    expect(refused!.deltas).toEqual([]);
+  });
+
+  it('same inputs, same verdict — twice', () => {
+    let g0 = world(5000);
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 4500 } });
+    const op = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 1000 } as const;
+    const first = willingnessOf(g0, 'char:st', op, 'char:ruler');
+    const second = willingnessOf(g0, 'char:st', op, 'char:ruler');
+    expect(first).toBe('drags');
+    expect(second).toBe(first);
+  });
+});
+
+// Beyond the brief's four: the rest of the scoring spec (the vengeful/grudge
+// override and the craven/martial cap) and applyMediatedOp's own behavior
+// contract (drags capping the band + op.delayed, refuses touching neither
+// the graph nor fortune, complies leaving the pre-Task-4 pipeline untouched).
+describe('willingness integration: applyMediatedOp (spec §3.5)', () => {
+  it('vengeful executor with a grudge against the op target refuses outright, regardless of score (reason "grudge")', () => {
+    let g0 = world(9000, { 'trait:vengeful': true });
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 9000 } }); // would comply on score alone
+    g0 = addNode(g0, { id: 'char:foe', type: 'character', props: { name: 'Foe' } });
+    g0 = addEdge(g0, { type: 'grudge', src: 'char:st', dst: 'char:foe', props: { bp: 3000 } });
+    const op = { kind: 'grant', charId: 'char:foe', amount: '5' } as const;
+    expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('refuses');
+
+    const em = makeEmitter(6);
+    const g2 = applyMediatedOp(g0, op, 6, makeFortune('venge'), em, { ...MED, willingness: true }, []);
+    expect(g2).toBe(g0);
+    expect(em.all().some((e) => e.type === 'op.executed')).toBe(false);
+    const refused = em.all().find((e) => e.type === 'op.refused');
+    expect(refused).toBeDefined();
+    expect(refused!.data).toEqual({ opKind: 'grant', executorId: 'char:st', reason: 'grudge' });
+    expect(refused!.deltas).toEqual([]);
+  });
+
+  it('craven executor + martial domain: complies caps down to drags; other domains are unaffected', () => {
+    let g0 = world(5000);
+    g0 = addNode(g0, { id: 'char:mar', type: 'character', props: { name: 'Marshal', 'trait:craven': true } });
+    g0 = addNode(g0, { id: 'char:target', type: 'character', props: { name: 'Target' } });
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:mar', dst: 'char:ruler', props: { bp: 9000 } }); // score 9000 -> complies on paper
+    const martialOp = { kind: 'imprison', charId: 'char:target' } as const; // no strike-own edge to char:target
+    expect(willingnessOf(g0, 'char:mar', martialOp, 'char:ruler')).toBe('drags'); // capped -- never fully complies
+
+    const econOp = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 500 } as const;
+    expect(willingnessOf(g0, 'char:mar', econOp, 'char:ruler')).toBe('complies'); // cap is martial-only
+  });
+
+  it('willingness "complies": identical outcome to willingness disabled, for the same seed', () => {
+    let g0 = world(9000);
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 6000 } }); // complies
+    const op = { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' } as const;
+
+    const emOff = makeEmitter(4);
+    const gOff = applyMediatedOp(g0, op, 4, makeFortune('cmp-eq'), emOff, MED, []);
+    const emOn = makeEmitter(4);
+    const gOn = applyMediatedOp(g0, op, 4, makeFortune('cmp-eq'), emOn, { ...MED, willingness: true }, []);
+
+    expect(hashValue(gOn)).toBe(hashValue(gOff));
+    expect(emOn.all()).toEqual(emOff.all());
+  });
+
+  it('willingness "drags": band never exceeds poor, and op.delayed fires exactly once at tick+2', () => {
+    let g0 = world(9000); // high aptitude -- most raw draws would be sound/outstanding
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 4500 } }); // drags
+    const op = { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' } as const;
+    for (let s = 0; s < 20; s++) {
+      const em = makeEmitter(6);
+      applyMediatedOp(g0, op, 6, makeFortune(`drag${s}`), em, { ...MED, willingness: true }, []);
+      const ex = em.all().find((e) => e.type === 'op.executed');
+      const band = (ex!.data as { band: string }).band;
+      expect(['botched', 'poor']).toContain(band); // capped: never sound/outstanding
+      const delayed = em.all().filter((e) => e.type === 'op.delayed');
+      expect(delayed).toHaveLength(1);
+      expect((delayed[0]!.data as { untilTick: number }).untilTick).toBe(8); // tick 6 + 2
+    }
+  });
+
+  it('willingness "drags" + slothful trait: still exactly one op.delayed (no double-emit)', () => {
+    let g0 = world(9000, { 'trait:slothful': true });
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 4500 } }); // drags
+    const op = { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' } as const;
+    for (let s = 0; s < 20; s++) {
+      const em = makeEmitter(6);
+      applyMediatedOp(g0, op, 6, makeFortune(`sldrag${s}`), em, { ...MED, willingness: true }, []);
+      const delayed = em.all().filter((e) => e.type === 'op.delayed');
+      expect(delayed).toHaveLength(1); // slothfulDelay and the willingness cap would both qualify -- only one fires
+      expect((delayed[0]!.data as { untilTick: number }).untilTick).toBe(8);
+    }
+  });
+
+  it('refusal consumes no fortune: the execution stream is never drawn, and a later draw on the same (tick, opKey) is unaffected', () => {
+    const tick = 5;
+    const op = { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' } as const;
+
+    // Wrap a real Fortune so we can PROVE the execution-stream draw
+    // (`.int`, the only thing drawBand calls) is never invoked on the
+    // refusal path -- not merely infer it from the chronicle's silence.
+    let intCalls = 0;
+    const real = makeFortune('willingness-no-fortune');
+    const spy: Fortune = {
+      roll: real.roll,
+      bp: real.bp,
+      pick: real.pick,
+      int: (stream, t, key, lo, hi, n) => {
+        intCalls++;
+        return real.int(stream, t, key, lo, hi, n);
+      },
+    };
+
+    let gRefuse = world(9000);
+    gRefuse = addEdge(gRefuse, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 2000 } }); // refuses
+
+    const emR = makeEmitter(tick);
+    const g2 = applyMediatedOp(gRefuse, op, tick, spy, emR, { ...MED, willingness: true }, []);
+    expect(g2).toBe(gRefuse); // unchanged
+    expect(emR.all().some((e) => e.type === 'op.executed')).toBe(false);
+    expect(emR.all().some((e) => e.type === 'op.refused')).toBe(true);
+    expect(intCalls).toBe(0); // the execution stream was never touched by the refusal
+
+    let gComply = world(9000);
+    gComply = addEdge(gComply, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 6000 } }); // complies
+
+    // Independent, out-of-band reference draw for the exact same (tick,
+    // opKey) the pipeline below is about to use. Fortune is a pure hash of
+    // (stream, tick, key, n) -- never a sequential/counter-advancing RNG
+    // (D21 stream discipline) -- so if the refusal above had secretly
+    // consumed or perturbed anything, it would show up here as a mismatch
+    // against the pipeline's own draw.
+    const expectedBand = drawBand(aptOf(gComply, 'char:st', 'apt:econ'), spy, tick, canonJson(op));
+
+    const emC = makeEmitter(tick);
+    applyMediatedOp(gComply, op, tick, spy, emC, { ...MED, willingness: true }, []);
+    const ex = emC.all().find((e) => e.type === 'op.executed');
+    expect(ex).toBeDefined();
+    expect((ex!.data as { band: string }).band).toBe(expectedBand);
   });
 });
