@@ -44,13 +44,14 @@ export interface OpParamDesc {
   values?: readonly string[];
 }
 
-export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc[] }> = {
+export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc[]; domain: 'econ' | 'martial' | 'social' | null }> = {
   decree_tax: {
     summary: 'Set the tax rate of a holding (basis points of harvest).',
     params: [
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'rateBp', type: 'int', min: 0, max: 10000 },
     ],
+    domain: 'econ',
   },
   release_grain: {
     summary: 'Open the granary: move grain to the dole.',
@@ -58,6 +59,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   stockpile_grain: {
     summary: 'Buy grain into the granary at market price.',
@@ -65,6 +67,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   appoint: {
     summary: 'Appoint a character to an office, replacing any holder.',
@@ -72,10 +75,12 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'officeId', type: 'nodeId', nodeType: 'office' },
     ],
+    domain: null,
   },
   audit: {
     summary: 'Audit an office. Costs AUDIT_COST. Exposes hidden skimming.',
     params: [{ name: 'officeId', type: 'nodeId', nodeType: 'office' }],
+    domain: 'econ',
   },
   grant: {
     summary: 'Grant treasury to a character; buys loyalty at 2.5bp per unit.',
@@ -83,6 +88,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   invest: {
     summary: 'Fund a project that matures in INVEST_MATURITY_TICKS ticks.',
@@ -91,14 +97,17 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'project', type: 'enum', values: ['irrigation', 'roads', 'walls'] },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   imprison: {
     summary: 'Imprison a character: offices vacated, a grudge kindled.',
     params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+    domain: 'martial',
   },
   pardon: {
     summary: 'Release an imprisoned character; cools their grudge, warms loyalty.',
     params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+    domain: null,
   },
   raise_levy: {
     summary: 'Raise militia at a holding (LEVY_RAISE_COST per unit; upkeep accrues).',
@@ -106,10 +115,12 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'size', type: 'fx' },
     ],
+    domain: 'martial',
   },
   disband_levy: {
     summary: 'Disband a holding’s levy entirely.',
     params: [{ name: 'placeId', type: 'nodeId', nodeType: 'place' }],
+    domain: 'martial',
   },
   send_envoy: {
     summary: 'Send an envoy to a character; tone moves grudge/loyalty deterministically.',
@@ -117,6 +128,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'tone', type: 'enum', values: ['conciliatory', 'firm', 'threatening'] },
     ],
+    domain: 'social',
   },
   seize: {
     summary: 'Seize part of a character’s wealth; kindles a grudge, costs legitimacy.',
@@ -124,6 +136,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'martial',
   },
   hold_festival: {
     summary: 'Spend treasury on public festivity; unrest eases by amount/8.',
@@ -131,6 +144,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'social',
   },
   record_stance: {
     summary: 'Record the throne’s stance on a named question; the chronicle and later storylets read it.',
@@ -138,6 +152,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'stanceId', type: 'stanceId' },
       { name: 'value', type: 'enum', values: ['for', 'against'] },
     ],
+    domain: null,
   },
 };
 
