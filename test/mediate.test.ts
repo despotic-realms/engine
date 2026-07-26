@@ -311,6 +311,34 @@ describe('willingness (spec §3.5 — deterministic, no dice)', () => {
     expect(first).toBe('drags');
     expect(second).toBe(first);
   });
+
+  it('boundary: loyalty bp exactly 5500 → complies (>= threshold)', () => {
+    let g0 = world(5000);
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 5500 } });
+    const op = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 1000 } as const;
+    expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('complies');
+  });
+
+  it('boundary: loyalty bp exactly 5499 → drags (< complies threshold)', () => {
+    let g0 = world(5000);
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 5499 } });
+    const op = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 1000 } as const;
+    expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('drags');
+  });
+
+  it('boundary: loyalty bp exactly 4000 → drags (>= drags threshold)', () => {
+    let g0 = world(5000);
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 4000 } });
+    const op = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 1000 } as const;
+    expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('drags');
+  });
+
+  it('boundary: loyalty bp exactly 3999 → refuses (< drags threshold)', () => {
+    let g0 = world(5000);
+    g0 = addEdge(g0, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 3999 } });
+    const op = { kind: 'decree_tax', placeId: 'place:ash', rateBp: 1000 } as const;
+    expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('refuses');
+  });
 });
 
 // Beyond the brief's four: the rest of the scoring spec (the vengeful/grudge
