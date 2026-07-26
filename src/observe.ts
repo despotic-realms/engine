@@ -73,12 +73,14 @@ function isKinOrLoyal(g: WorldGraph, reporterId: string, executorId: string): bo
 //   6. else                                                       -> 50% one-step error (roll parity)
 // Rules 1-4 are fully deterministic and never touch `fortune`; rules 5/6
 // draw exactly once each -- the SAME roll decides both whether an error
-// occurs and, when it does, which direction (even -> down, odd -> up).
-// `eventId` is the observed op.executed event's own id, the fortune key
-// the brief specifies for rules 5/6.
+// occurs and, when it does, which direction (even -> down, odd -> up). The
+// draw key composes the observed event's id with the reporting seat's own
+// id (see the draw site below), so distinct reporters judging the same
+// event draw independently.
 function claimedBandFor(
   g: WorldGraph,
   reporterId: string,
+  reporterSeatId: string,
   executorId: string,
   trueBand: Band,
   tick: number,
@@ -95,7 +97,17 @@ function claimedBandFor(
   if (judge >= JUDGE_TRUTH_THRESHOLD) return trueBand; // rule 4
 
   const errorRate = judge >= JUDGE_ERROR_THRESHOLD ? MID_JUDGE_ERROR_RATE : LOW_JUDGE_ERROR_RATE; // rule 5 vs 6
-  const roll = fortune.int('observation', tick, eventId, 0, 999);
+  // Draw key = event id + reporter seat id, space-joined -- the same idiom
+  // replay.ts's divergence() uses to compose a Set/Map key from plain id
+  // strings (`${e.id} ${e.type} ${canonJson(e.data)}`). The event id ALONE
+  // (the original key) would make every reporter in the same judge band
+  // draw IDENTICALLY off a single op.executed event: same error/no-error
+  // verdict, same direction, for every seat watching it -- one coin flip
+  // impersonating N independent witnesses. Folding in the seat id makes
+  // each reporter's fallibility its own draw. The join is injective because
+  // both id grammars exclude spaces (events: t{tick}.{seq}; seats:
+  // seat:{name}), so no distinct (event, seat) pair can collide.
+  const roll = fortune.int('observation', tick, `${eventId} ${reporterSeatId}`, 0, 999);
   if (roll >= errorRate) return trueBand;
   return stepBand(trueBand, roll % 2 === 0 ? -1 : 1);
 }
@@ -129,7 +141,7 @@ export function observeExecutions(
   for (const ev of events) {
     if (ev.type === 'op.executed') {
       const data = ev.data as unknown as ExecutedData;
-      const claimedBand = claimedBandFor(g, reporterId, data.executorId, data.band, tick, fortune, ev.id);
+      const claimedBand = claimedBandFor(g, reporterId, reporterSeat.id, data.executorId, data.band, tick, fortune, ev.id);
       observations.push({ executorId: data.executorId, domain: data.domain, claimedBand, taskRef: ev.id });
     } else if (ev.type === 'op.skimmed') {
       const data = ev.data as unknown as SkimmedData;

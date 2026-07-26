@@ -174,12 +174,13 @@ describe('observeExecutions: rule 5 -- apt:judge in [4000,6000) -> 25% one-step 
   it('scans seeds: no-error (true band), errs down (even roll), errs up (odd roll) all occur and match', () => {
     const tick = 5;
     const eventId = `t${tick}.0`;
+    const drawKey = `${eventId} seat:test`; // Fix 1: key is now event id + reporter seat id (seatFor's 'seat:test')
     let sawNoError = false;
     let sawDown = false;
     let sawUp = false;
     for (let s = 0; s < 300 && !(sawNoError && sawDown && sawUp); s++) {
       const f = makeFortune(`rule5-${s}`);
-      const roll = f.int('observation', tick, eventId, 0, 999);
+      const roll = f.int('observation', tick, drawKey, 0, 999);
       let g = baseGraph();
       g = setNodeProp(g, 'char:reporter', 'apt:judge', 4500);
       const em = makeEmitter(tick);
@@ -205,12 +206,13 @@ describe('observeExecutions: rule 6 -- else (apt:judge < 4000) -> 50% one-step e
   it('scans seeds: no-error (true band), errs down (even roll), errs up (odd roll) all occur and match', () => {
     const tick = 6;
     const eventId = `t${tick}.0`;
+    const drawKey = `${eventId} seat:test`; // Fix 1: key is now event id + reporter seat id (seatFor's 'seat:test')
     let sawNoError = false;
     let sawDown = false;
     let sawUp = false;
     for (let s = 0; s < 300 && !(sawNoError && sawDown && sawUp); s++) {
       const f = makeFortune(`rule6-${s}`);
-      const roll = f.int('observation', tick, eventId, 0, 999);
+      const roll = f.int('observation', tick, drawKey, 0, 999);
       let g = baseGraph();
       g = setNodeProp(g, 'char:reporter', 'apt:judge', 0);
       const em = makeEmitter(tick);
@@ -233,13 +235,14 @@ describe('observeExecutions: rule 6 -- else (apt:judge < 4000) -> 50% one-step e
   it('apt:judge exactly 3999 uses the 50% branch where the default (unset, 5000) would use the 25% branch', () => {
     const tick = 6;
     const eventId = `t${tick}.0`;
+    const drawKey = `${eventId} seat:test`; // Fix 1: key is now event id + reporter seat id (seatFor's 'seat:test'); both branches below use the same seat, so the key -- and thus the precomputed roll -- is identical for both
     // A seed whose roll lands strictly between the two thresholds (25%/50%
     // as roll counts 250/500 out of 1000): rule 5 reads it as "no error",
     // rule 6 reads the SAME roll as "error" -- isolating the threshold.
     let seed = '';
     for (let s = 0; s < 300; s++) {
       const candidate = `rule6-boundary-${s}`;
-      const roll = makeFortune(candidate).int('observation', tick, eventId, 0, 999);
+      const roll = makeFortune(candidate).int('observation', tick, drawKey, 0, 999);
       if (roll >= 250 && roll < 500) { seed = candidate; break; }
     }
     if (!seed) throw new Error('no seed with 250<=roll<500 in 300 tries — widen scan');
@@ -254,6 +257,61 @@ describe('observeExecutions: rule 6 -- else (apt:judge < 4000) -> 50% one-step e
     const emLow = makeEmitter(tick);
     emLow.emit('op.executed', { data: { opKind: 'stockpile_grain', executorId: 'char:executor', officeId: 'office:x', domain: 'econ', band: 'sound' } });
     expect(observeExecutions(gLow, emLow.all(), seatFor('char:reporter'), tick, f)[0]!.claimedBand).not.toBe('sound');
+  });
+});
+
+describe('clamp-edge coverage: stepBand cannot go below botched or above outstanding (rules 5/6)', () => {
+  it('true band botched + erring roll with downward parity -> claimedBand stays botched (lower clamp)', () => {
+    const tick = 9;
+    const eventId = `t${tick}.0`;
+    const drawKey = `${eventId} seat:test`; // Fix 1 key: event id + reporter seat id
+    // rule 6 (low judge, 50% error: roll < 500), even roll -> down-step --
+    // from 'botched' (index 0) that would land on index -1, which
+    // clampBandIndex must pull back to 0. No seed scan for rule 5/6 in this
+    // file has ever landed here: every prior scan used trueBand 'sound',
+    // where a down-step (-> 'poor') or up-step (-> 'outstanding') never
+    // touches either clamp.
+    let seed = '';
+    for (let s = 0; s < 300; s++) {
+      const candidate = `clamp-lo-${s}`;
+      const roll = makeFortune(candidate).int('observation', tick, drawKey, 0, 999);
+      if (roll < 500 && roll % 2 === 0) { seed = candidate; break; }
+    }
+    if (!seed) throw new Error('no seed with err+down parity in 300 tries — widen scan');
+    const f = makeFortune(seed);
+    let g = baseGraph();
+    g = setNodeProp(g, 'char:reporter', 'apt:judge', 0); // rule 6
+    const em = makeEmitter(tick);
+    em.emit('op.executed', { data: { opKind: 'stockpile_grain', executorId: 'char:executor', officeId: 'office:x', domain: 'econ', band: 'botched' } });
+    expect(em.all()[0]!.id).toBe(eventId); // sanity: precomputed key matches the real event id
+    const obs = observeExecutions(g, em.all(), seatFor('char:reporter'), tick, f);
+    expect(obs[0]!.claimedBand).toBe('botched');
+  });
+
+  it('true band outstanding + erring roll with upward parity -> claimedBand stays outstanding (upper clamp)', () => {
+    const tick = 9;
+    const eventId = `t${tick}.0`;
+    const drawKey = `${eventId} seat:test`; // Fix 1 key: event id + reporter seat id
+    // rule 6 (low judge, 50% error: roll < 500), odd roll -> up-step -- from
+    // 'outstanding' (index 3, LAST_BAND) that would land on index 4, which
+    // clampBandIndex must pull back to 3. This is the random-path mirror of
+    // rule 3's deterministic outstanding->sound deflation; here the clamp,
+    // not a precedence rule, is what holds the band in place.
+    let seed = '';
+    for (let s = 0; s < 300; s++) {
+      const candidate = `clamp-hi-${s}`;
+      const roll = makeFortune(candidate).int('observation', tick, drawKey, 0, 999);
+      if (roll < 500 && roll % 2 === 1) { seed = candidate; break; }
+    }
+    if (!seed) throw new Error('no seed with err+up parity in 300 tries — widen scan');
+    const f = makeFortune(seed);
+    let g = baseGraph();
+    g = setNodeProp(g, 'char:reporter', 'apt:judge', 0); // rule 6
+    const em = makeEmitter(tick);
+    em.emit('op.executed', { data: { opKind: 'stockpile_grain', executorId: 'char:executor', officeId: 'office:x', domain: 'econ', band: 'outstanding' } });
+    expect(em.all()[0]!.id).toBe(eventId); // sanity: precomputed key matches the real event id
+    const obs = observeExecutions(g, em.all(), seatFor('char:reporter'), tick, f);
+    expect(obs[0]!.claimedBand).toBe('outstanding');
   });
 });
 
@@ -437,6 +495,31 @@ describe('direct witness vs per-reporter routing (spec §4 step 4, resolved read
     const state = initialState(season);
     const out = resolveTick(season, state, { seatId: 'seat:throne', choices: [] }, f);
     expect(out.events.some((e) => e.type === 'op.executed')).toBe(false);
+    expect(out.events.some((e) => e.type === 'observation.received')).toBe(false);
+  });
+});
+
+// Fix 3 (T5 review): the two describes above only ever exercise starterSeason()
+// with its reporters or mediation deliberately overridden ([] or added). The
+// actual shipped shape -- a non-empty reporters array (the steward seat)
+// paired with NO tier configuring mediation -- was previously exercised only
+// by `pnpm demo`, never pinned in the automated gate. It happens to be a
+// no-op (op.executed can only ever come from applyMediatedOp, so an
+// unmediated tier starves observeExecutions of anything to select), but that
+// "happens to be" is exactly the kind of fact that should be a receipt, not
+// folklore.
+describe('real-default shape (T5 review): unmodified starterSeason() ships non-empty reporters + no mediation on any tier', () => {
+  it('one resolveTick on the untouched default config runs clean -- no observation.received, no error', () => {
+    const season = starterSeason();
+    // Sanity on the premise itself: if starterSeason() ever changes shape,
+    // this test should fail loudly here rather than quietly stop covering
+    // what it claims to.
+    expect(season.reporters.length).toBeGreaterThan(0);
+    for (const tier of Object.values(season.tiers)) expect(tier.mediation).toBeUndefined();
+
+    const f = makeFortune('real-default-shape');
+    const state = initialState(season);
+    const out = resolveTick(season, state, { seatId: season.throne.id, choices: [] }, f);
     expect(out.events.some((e) => e.type === 'observation.received')).toBe(false);
   });
 });
