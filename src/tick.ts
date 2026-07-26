@@ -16,10 +16,13 @@ import type { Op } from './ops.js';
 import { applyOp, validateOp } from './ops.js';
 import type { MediationConfig } from './mediate.js';
 import { applyMediatedOp } from './mediate.js';
+import type { Observation } from './observe.js';
+import { observeExecutions } from './observe.js';
 import type { ReportedLedger, Seat } from './report.js';
 import { compileReport } from './report.js';
 import type { ExaminerCalendar } from './scheduler.js';
 import { advanceArcs, examiner } from './scheduler.js';
+import type { Band } from './spine.js';
 import type { Deck, Storylet } from './storylet.js';
 import { bindOps, eligibleStorylets, renderTpl } from './storylet.js';
 import { economyStep, socialStep } from './systems.js';
@@ -232,6 +235,49 @@ export function resolveTick(
     }
   }
 
+  // 4.5. Observations (spec §4): execution events reach the throne only as
+  // OBSERVATIONS, bent by the observer's own interests -- computed here,
+  // right after ops apply and before step 5-7's systems can drift the very
+  // loyalty/grudge edges the precedence rules read (socialStep relaxes
+  // loyalty and decays grudge every tick; an observation should read the
+  // relationship as of the report, not after a further tick of decay
+  // already landed on top of it). When reporter seats are configured, each
+  // compiles a biased read of this tick's op.executed/op.skimmed events
+  // (observeExecutions -- pure selection, mirrors examiner.select), and
+  // those observations ride along on that seat's report at step 10. When no
+  // reporter seat exists at all, the throne watches directly and
+  // unfiltered: true band, via 'direct' -- there is no report to attach
+  // this to, so the chronicle carries it alone. At an unmediated tier
+  // op.executed never fires in the first place (mediate.ts only emits it
+  // from applyMediatedOp), so the direct branch is a natural no-op there;
+  // it exists for a mediated tier with no reporting office configured.
+  const executionEvents = em.all();
+  const sortedReporters = [...season.reporters].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const observationsBySeat = new Map<string, Observation[]>();
+  if (sortedReporters.length === 0) {
+    if (tierCfg.mediation) {
+      for (const ev of executionEvents) {
+        if (ev.type === 'op.executed') {
+          const data = ev.data as { executorId: string; domain: string; band: Band };
+          const obs: Observation = { executorId: data.executorId, domain: data.domain, claimedBand: data.band, taskRef: ev.id };
+          em.emit('observation.received', { parents: [obs.taskRef], data: { ...obs, via: 'direct' } });
+        } else if (ev.type === 'op.skimmed') {
+          const data = ev.data as { executorId: string };
+          const obs: Observation = { executorId: data.executorId, domain: 'econ', claimedBand: 'poor', taskRef: ev.id };
+          em.emit('observation.received', { parents: [obs.taskRef], data: { ...obs, via: 'direct' } });
+        }
+      }
+    }
+  } else {
+    for (const seat of sortedReporters) {
+      const obs = observeExecutions(g, executionEvents, seat, tick, fortune);
+      observationsBySeat.set(seat.id, obs);
+      for (const o of obs) {
+        em.emit('observation.received', { parents: [o.taskRef], data: { ...o, via: seat.id } });
+      }
+    }
+  }
+
   // 5-7. Systems.
   g = economyStep(g, tick, fortune, em);
   g = socialStep(g, tick, em);
@@ -281,14 +327,14 @@ export function resolveTick(
     return { from, title: renderTpl(entry.storylet.title, g, entry.binding), body: renderTpl(entry.storylet.body, g, entry.binding), storyletId: entry.storylet.id };
   });
 
-  // 10. Reports — biased projections, per reporting seat (sorted by seat id).
-  const reports: ReportedLedger[] = [...season.reporters]
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .map((seat) => {
-      const report = compileReport(g, fortune, nextTick, season.primaryPlaceId, seat);
-      em.emit('report.issued', { data: { ...report } });
-      return report;
-    });
+  // 10. Reports — biased projections, per reporting seat (sorted by seat id;
+  // sortedReporters and this tick's compiled observations are shared with
+  // step 4.5 above so both loops walk the same seats in the same order).
+  const reports: ReportedLedger[] = sortedReporters.map((seat) => {
+    const report = compileReport(g, fortune, nextTick, season.primaryPlaceId, seat, observationsBySeat.get(seat.id) ?? []);
+    em.emit('report.issued', { data: { ...report } });
+    return report;
+  });
 
   return {
     state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending },

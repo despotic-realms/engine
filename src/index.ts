@@ -13,6 +13,7 @@ export * from './match.js';
 export * from './decks/thornfield.js';
 export * from './storylet.js';
 export * from './report.js';
+export * from './observe.js';
 export * from './decks/starter.js';
 export * from './systems.js';
 export * from './ladder.js';
