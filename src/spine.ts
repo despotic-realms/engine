@@ -1,6 +1,8 @@
 // The character spine's closed vocabularies (spec §2). Setting packs skin
 // the NOUNS at render surfaces; these canonical keys never appear in prose.
 // apt:* values are engine-internal: only bands (bands.ts) leave the engine.
+// Callers pass an existing charId; "absent" means a missing prop on an existing node.
+// Behavior for existing nodes is unchanged (absent apt prop → 5000; absent trait → false; wantIndex past end → null).
 import type { WorldGraph } from './graph.js';
 import { getNode } from './graph.js';
 
@@ -19,19 +21,19 @@ export type Band = (typeof BANDS)[number];
 const APT_DEFAULT = 5000; // unauthored characters are exactly median
 
 export function aptOf(g: WorldGraph, charId: string, key: AptKey): number {
-  const v = getNode(g, charId)?.props[key];
+  const v = getNode(g, charId).props[key];
   return typeof v === 'number' ? v : APT_DEFAULT;
 }
 
 export function hasTrait(g: WorldGraph, charId: string, key: TraitKey): boolean {
-  return getNode(g, charId)?.props[`trait:${key}`] === true;
+  return getNode(g, charId).props[`trait:${key}`] === true;
 }
 
 /** The rolling focus: wantChain[wantIndex], or null past the end (sated). */
 export function currentWant(g: WorldGraph, charId: string): string | null {
   const n = getNode(g, charId);
-  const chain = n?.props['wantChain'];
-  const idx = n?.props['wantIndex'];
+  const chain = n.props['wantChain'];
+  const idx = n.props['wantIndex'];
   if (!Array.isArray(chain) || typeof idx !== 'number') return null;
   const w = chain[idx];
   return typeof w === 'string' ? w : null;

@@ -22,9 +22,13 @@ describe('spine vocabularies', () => {
     expect(hasTrait(g, 'char:x', 'craven')).toBe(false);
     expect(currentWant(g, 'char:x')).toBe('office'); // wantIndex 1
   });
-  it('every op kind carries a domain tag or explicit null', () => {
-    for (const [kind, desc] of Object.entries(OP_KINDS)) {
-      expect(['econ', 'martial', 'social', null]).toContain((desc as { domain: string | null }).domain);
-    }
+  it('every op kind carries its specified domain', () => {
+    const expected = {
+      decree_tax: 'econ', release_grain: 'econ', stockpile_grain: 'econ', appoint: null,
+      audit: 'econ', grant: 'econ', invest: 'econ', imprison: 'martial', pardon: null,
+      raise_levy: 'martial', disband_levy: 'martial', send_envoy: 'social', seize: 'martial',
+      hold_festival: 'social', record_stance: null,
+    };
+    expect(Object.fromEntries(Object.entries(OP_KINDS).map(([k, d]) => [k, d.domain]))).toEqual(expected);
   });
 });

@@ -11,6 +11,11 @@ describe('canon', () => {
     expect(fromCanon(canonJson(v))).toEqual(v);
     expect(canonJson(1n)).toBe('{"$n":"1"}');
   });
+  it('serializes nested props: object with array with string, number, and nested bigint', () => {
+    const nested = { items: ['text', 42, { amount: 100n }] };
+    expect(canonJson(nested)).toBe('{"items":["text",42,{"amount":{"$n":"100"}}]}');
+    expect(fromCanon(canonJson(nested))).toEqual(nested);
+  });
   it('rejects non-canonical values', () => {
     expect(() => canonJson({ x: 1.5 })).toThrow();      // float
     expect(() => canonJson({ x: undefined })).toThrow();

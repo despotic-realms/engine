@@ -8,7 +8,7 @@ export type NodeId = string;
 export type EdgeId = string;
 export type NodeType = 'character' | 'faction' | 'place' | 'office' | 'institution' | 'project';
 export type EdgeType = 'grudge' | 'loyalty' | 'kinship' | 'debt' | 'appointment' | 'route' | 'interest';
-export type PropValue = bigint | number | string | boolean;
+export type PropValue = bigint | number | string | boolean | PropValue[] | { [key: string]: PropValue };
 export type Props = Record<string, PropValue>;
 
 export interface WorldNode { readonly id: NodeId; readonly type: NodeType; readonly props: Props }
