@@ -35,6 +35,10 @@ export interface SchedulerContext {
   eligible: EligibleEntry[];
   fortune: Fortune;
   calendar: ExaminerCalendar;
+  /** Times each instanceKey has already been presented as a brief (D13
+   *  novelty casting). Read-only here; tick.ts passes the pre-increment
+   *  snapshot, so selection for tick N sees counts as of N-1. */
+  presented: Record<string, number>;
 }
 
 export interface SchedulerSelection {
@@ -50,12 +54,13 @@ export interface SchedulerPolicy {
 
 export const examiner: SchedulerPolicy = {
   name: 'examiner',
-  select({ tick, briefBudget, eligible, fortune, calendar }) {
+  select({ tick, briefBudget, eligible, fortune, calendar, presented }) {
     const letters = eligible.filter((e) => e.storylet.kind === 'letter');
     const pool = eligible.filter((e) => e.storylet.kind === 'brief');
     const chosen: EligibleEntry[] = [];
     const skippedProbes: string[] = [];
 
+    // Probes are the instrument: forced regardless of presentation count.
     for (const entry of calendar) {
       if (entry.tick !== tick || entry.storyletId === undefined) continue;
       const hit = pool.find((e) => e.storylet.id === entry.storyletId);
@@ -63,9 +68,22 @@ export const examiner: SchedulerPolicy = {
       if (hit && chosen.length < briefBudget) chosen.push(hit);
       else skippedProbes.push(entry.storyletId); // absent from the pool, or budget already spent -- either way, unobserved
     }
+    // D13: leftover slots draw from the least-presented stratum first, so a
+    // healthy reign spreads across the pool instead of looping a favorite
+    // few. Counts are per instanceKey, so a perBinding generator's fresh
+    // binding competes at count 0 like any other unseen content. Ties
+    // within a stratum keep the seeded lottery; an all-tied pool (the
+    // common case early in a reign) is exactly the old unstratified draw.
     let remaining = pool.filter((e) => !chosen.includes(e));
     for (let slot = 0; chosen.length < briefBudget && remaining.length > 0; slot++) {
-      const pick = fortune.pick('casting', tick, 'slot', remaining, slot);
+      // Min by hand, not Math.min (banned in core, see ops.ts's clampBp).
+      let minCount = presented[remaining[0]!.instanceKey] ?? 0;
+      for (const e of remaining) {
+        const count = presented[e.instanceKey] ?? 0;
+        if (count < minCount) minCount = count;
+      }
+      const stratum = remaining.filter((e) => (presented[e.instanceKey] ?? 0) === minCount);
+      const pick = fortune.pick('casting', tick, 'slot', stratum, slot);
       chosen.push(pick);
       remaining = remaining.filter((e) => e !== pick);
     }

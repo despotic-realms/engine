@@ -37,16 +37,16 @@ const CAL: ExaminerCalendar = [
 describe('examiner', () => {
   it('forces calendar probes, fills the rest from the casting stream', () => {
     const eligible = eligibleStorylets(thornfieldGraph(), [starterDeck], {}, 4, {});
-    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL });
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL, presented: {} });
     expect(sel.chosen.map((e) => e.storylet.id)).toContain('starter.audit-whisper');
     expect(sel.chosen).toHaveLength(2);
     expect(sel.letters.every((e) => e.storylet.kind === 'letter')).toBe(true);
-    const again = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL });
+    const again = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL, presented: {} });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });
   it('records unfillable probes instead of inventing them', () => {
     const eligible = eligibleStorylets(thornfieldGraph(), [starterDeck], {}, 9, {});
-    const sel = examiner.select({ tick: 9, briefBudget: 1, eligible, fortune: f, calendar: CAL });
+    const sel = examiner.select({ tick: 9, briefBudget: 1, eligible, fortune: f, calendar: CAL, presented: {} });
     expect(sel.skippedProbes).toEqual(['starter.not-in-deck']);
   });
   it('records a budget-blocked forced probe in skippedProbes, not just an absent one', () => {
@@ -56,7 +56,7 @@ describe('examiner', () => {
       { tick: 4, storyletId: 'probe.two' },
       { tick: 4, storyletId: 'probe.three' },
     ];
-    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar });
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar, presented: {} });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one', 'probe.two']);
     expect(sel.skippedProbes).toEqual(['probe.three']);
   });
@@ -66,7 +66,7 @@ describe('examiner', () => {
       { tick: 4, storyletId: 'probe.one' },
       { tick: 4, storyletId: 'probe.one' },
     ];
-    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible, fortune: f, calendar });
+    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible, fortune: f, calendar, presented: {} });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one']);
     expect(sel.skippedProbes).toEqual([]);
   });

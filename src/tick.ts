@@ -56,6 +56,7 @@ export interface ReignState {
   graph: WorldGraph;
   cooldowns: Record<string, number>;
   firedOnce: Record<string, true>;
+  presented: Record<string, number>;   // instanceKey -> times presented as a brief (D13 novelty casting)
   pending: PendingBrief[];
 }
 
@@ -90,7 +91,7 @@ export interface TickPacket {
 }
 
 export function initialState(season: SeasonConfig): ReignState {
-  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, pending: [] };
+  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [] };
 }
 
 const CHOICE_KEYS = new Set(['briefId', 'optionId', 'ops', 'via', 'compileRef']);
@@ -240,8 +241,11 @@ export function resolveTick(
   const decks = season.decks.filter((d) => nextCfg.deckIds.includes(d.id));
   const cooldowns = { ...state.cooldowns };
   const firedOnce = { ...state.firedOnce };
+  const presented = { ...state.presented };
   const eligible = eligibleStorylets(g, decks, cooldowns, nextTick, firedOnce);
-  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar });
+  // presented (pre-increment below) is the N-1 snapshot: this tick's own
+  // presentations don't count toward its own selection.
+  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented });
   for (const id of sel.skippedProbes) em.emit('probe.skipped', { data: { storyletId: id, tick: nextTick } });
 
   const pending: PendingBrief[] = [];
@@ -250,6 +254,7 @@ export function resolveTick(
     const briefId = `b${nextTick}.${i}`;
     const ev = em.emit('brief.presented', { data: { briefId, storyletId: entry.storylet.id, instanceKey: entry.instanceKey, binding: entry.binding, forTick: nextTick } });
     cooldowns[entry.instanceKey] = nextTick;
+    presented[entry.instanceKey] = (presented[entry.instanceKey] ?? 0) + 1;
     if (entry.storylet.once) firedOnce[entry.instanceKey] = true;
     pending.push({ briefId, storyletId: entry.storylet.id, binding: entry.binding, defaultOptionId: entry.storylet.defaultOptionId, presentedEventId: ev.id });
     briefs.push({
@@ -279,7 +284,7 @@ export function resolveTick(
     });
 
   return {
-    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, pending },
+    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending },
     events: em.all(),
     packet: { tick: nextTick, tier, attentionSlots: nextCfg.attentionSlots, briefs, reports, correspondence },
   };
