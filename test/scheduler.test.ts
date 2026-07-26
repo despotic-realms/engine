@@ -72,6 +72,56 @@ describe('examiner', () => {
   });
 });
 
+// D13 fix (meta#1): the casting stream that fills leftover brief slots used
+// to be a flat seeded draw over the whole eligible pool, with no memory of
+// what had already been shown -- a 40-tick reign repeated the same handful
+// of storylets while others sat at zero. It now deterministically prefers
+// the least-presented instances: the pool is stratified by `presented`
+// count and each slot draws from the lowest non-empty stratum.
+describe('novelty-stratified casting (D13)', () => {
+  it('fills the budget from the least-presented stratum before touching a more-presented entry', () => {
+    const pool = [mkBriefEntry('a'), mkBriefEntry('b'), mkBriefEntry('c')];
+    const presented = { a: 0, b: 1, c: 0 };
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented });
+    expect(sel.chosen).toHaveLength(2);
+    expect(sel.chosen.map((e) => e.storylet.id).sort()).toEqual(['a', 'c']); // b (count 1) excluded
+  });
+  it('reaches into the next stratum only once the lower one is exhausted', () => {
+    const pool = [mkBriefEntry('a'), mkBriefEntry('b'), mkBriefEntry('c')];
+    const presented = { a: 0, b: 1, c: 0 };
+    const sel = examiner.select({ tick: 4, briefBudget: 3, eligible: pool, fortune: f, calendar: [], presented });
+    expect(sel.chosen.map((e) => e.storylet.id)).toHaveLength(3);
+    expect(sel.chosen[2]?.storylet.id).toBe('b'); // the sole count-1 entry, cast last regardless of a/c order
+  });
+  it('all-equal counts reduce to the plain seeded lottery over the whole pool', () => {
+    const pool = [mkBriefEntry('a'), mkBriefEntry('b'), mkBriefEntry('c'), mkBriefEntry('d')];
+    const presented = { a: 3, b: 3, c: 3, d: 3 };
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented });
+    expect(sel.chosen).toHaveLength(2);
+    for (const e of sel.chosen) expect(pool).toContain(e);
+    // A tied stratum equals the full remaining pool at every slot, so the
+    // pre-D13 unstratified draw must be reproducible slot-by-slot from the
+    // same raw fortune.pick sequence.
+    let remaining = pool;
+    const expected: string[] = [];
+    for (let slot = 0; expected.length < 2; slot++) {
+      const pick = f.pick('casting', 4, 'slot', remaining, slot);
+      expected.push(pick.storylet.id);
+      remaining = remaining.filter((e) => e !== pick);
+    }
+    expect(sel.chosen.map((e) => e.storylet.id)).toEqual(expected);
+    const again = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented });
+    expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
+  });
+  it('a calendar-forced probe fires at a high presented count -- probes bypass stratification', () => {
+    const pool = [mkBriefEntry('probe.one'), mkBriefEntry('fresh')];
+    const presented = { 'probe.one': 50, fresh: 0 };
+    const calendar: ExaminerCalendar = [{ tick: 4, storyletId: 'probe.one' }];
+    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar, presented });
+    expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one']);
+  });
+});
+
 // D14: advanceArcs is delta-native -- the same discipline economyStep and
 // socialStep follow (test/systems.test.ts, test/ladder.test.ts). Every
 // famineStage/famineEndsAt mutation is built as a GraphDelta[], applied
