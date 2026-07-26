@@ -14,6 +14,8 @@ import { applyTransition, checkLadder } from './ladder.js';
 import type { Binding } from './match.js';
 import type { Op } from './ops.js';
 import { applyOp, validateOp } from './ops.js';
+import type { MediationConfig } from './mediate.js';
+import { applyMediatedOp } from './mediate.js';
 import type { ReportedLedger, Seat } from './report.js';
 import { compileReport } from './report.js';
 import type { ExaminerCalendar } from './scheduler.js';
@@ -22,7 +24,7 @@ import type { Deck, Storylet } from './storylet.js';
 import { bindOps, eligibleStorylets, renderTpl } from './storylet.js';
 import { economyStep, socialStep } from './systems.js';
 
-export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number }
+export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number; mediation?: MediationConfig }
 
 export interface SeasonConfig {
   seasonId: string;
@@ -203,7 +205,9 @@ export function resolveTick(
     for (const op of ops) {
       const r = validateOp(g, op);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
-      g = applyOp(g, r.op, tick, em, [decisionEvents.get(choice.briefId)!]);
+      g = tierCfg.mediation
+        ? applyMediatedOp(g, r.op, tick, fortune, em, tierCfg.mediation, [decisionEvents.get(choice.briefId)!])
+        : applyOp(g, r.op, tick, em, [decisionEvents.get(choice.briefId)!]);
     }
   }
 
@@ -220,8 +224,11 @@ export function resolveTick(
     });
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
       const r = validateOp(g, op);
-      if (r.ok) g = applyOp(g, r.op, tick, em, [ev.id]);
-      else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
+      if (r.ok) {
+        g = tierCfg.mediation
+          ? applyMediatedOp(g, r.op, tick, fortune, em, tierCfg.mediation, [ev.id])
+          : applyOp(g, r.op, tick, em, [ev.id]);
+      } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
     }
   }
 
