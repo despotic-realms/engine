@@ -12,7 +12,7 @@ import { edgesTo, getNode } from './graph.js';
 import { fx, fxToString, mulFx, FX_ZERO } from './fx.js';
 import type { Fx } from './fx.js';
 import { canonJson } from './canon.js';
-import { applyOp, OP_KINDS, type Op } from './ops.js';
+import { applyOp, validateOp, OP_KINDS, type Op } from './ops.js';
 import { hasTrait, aptOf, BANDS, type AptKey, type Band } from './spine.js';
 
 export interface MediationConfig {
@@ -20,8 +20,9 @@ export interface MediationConfig {
   willingness: boolean;
 }
 
-/** Integer percent scaling for fx amounts without division: amount * pct / 100
- *  via mulFx against a fixed-point percent literal (e.g. fx('0.6')). */
+/** Scales an fx amount by multiplying against a normalized fractional fx
+ *  literal (e.g. '0.6' means three-fifths) via mulFx -- no runtime division
+ *  is involved anywhere in this scaling. */
 const BAND_AMOUNT_SCALE: Record<Band, string> = { botched: '0', poor: '0.6', sound: '1', outstanding: '1.3' };
 const SKIM_SCALE = '0.15';
 
@@ -108,7 +109,7 @@ export function applyMediatedOp(
   const officeId = cfg.officeForDomain[domain];
   const executorId = executorOf(g, officeId);
   if (executorId === null) {
-    em.emit('op.rejected', { parents, data: { reason: 'no hands', opKind: op.kind, officeId } });
+    em.emit('op.rejected', { parents, data: { reason: 'no hands', opKind: op.kind, officeId, source: 'mediation' } });
     return g;
   }
 
@@ -127,9 +128,21 @@ export function applyMediatedOp(
   const executedEventId = em.nextId();
   em.emit('op.executed', { parents, data: { opKind: op.kind, executorId, officeId, domain, band } });
 
+  // Scaling may never exceed what validateOp already approved for the
+  // unscaled op (src/ops.ts:224-276): re-validate the band-scaled op against
+  // the same sufficiency/floor checks before applying it. The outstanding
+  // bonus materializes only when slack exists; if scaling breaks a check the
+  // unscaled amount already cleared -- an outstanding draw outrunning
+  // treasury/granary/wealth, or a poor draw undercutting a floor like
+  // hold_festival's minimum -- fall back to the ORIGINAL unscaled op, which
+  // the caller already validated. Either way op.executed (emitted above)
+  // keeps the drawn band: the fallback only caps the material effect, never
+  // the demonstrated skill on record.
   let g2 = g;
   if (band !== 'botched') {
-    g2 = applyOp(g2, scaleOp(op, band), tick, em, [executedEventId]);
+    const scaled = scaleOp(op, band);
+    const scaledCheck = validateOp(g2, scaled);
+    g2 = applyOp(g2, scaledCheck.ok ? scaled : op, tick, em, [executedEventId]);
   }
 
   if (domain === greedySkim.domain && BANDS.indexOf(band) < BANDS.indexOf(greedySkim.belowBand) && hasTrait(g2, executorId, greedySkim.trait)) {

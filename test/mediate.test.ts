@@ -24,7 +24,8 @@ describe('mediated execution (spec §3)', () => {
   it('gates on a live appointee: vacant office -> op.rejected, graph unchanged', () => {
     const em = makeEmitter(3);
     let g = world(7000);
-    g = { ...g }; // vacate by using martial office that has no appointee
+    // office:marshal never exists in this fixture -- missing office and
+    // vacant office resolve identically.
     const g2 = applyMediatedOp(g, { kind: 'raise_levy', placeId: 'place:ash', size: '10' }, 3, makeFortune('m'), em, MED, []);
     expect(g2).toBe(g);
     expect(em.all().some((e) => e.type === 'op.rejected')).toBe(true);
@@ -155,5 +156,82 @@ describe('wired into resolveTick (tick.ts step 4)', () => {
     // decree_tax has no fx amount, so scaleOp is a no-op regardless of band --
     // the only branch that changes shape is botched (no application at all).
     expect(next.events.some((e) => e.type === 'op.decree_tax')).toBe(band !== 'botched');
+  });
+});
+
+// T3 critical: applyMediatedOp applied the band-scaled op via applyOp
+// without re-validating it -- but validateOp (src/ops.ts:224-276) only ever
+// approved the UNSCALED amount. An 'outstanding' draw (x1.3) can scale a
+// just-affordable op past what the treasury/granary/target actually holds;
+// a 'poor' draw (x0.6) can scale an op below a validated floor (e.g.
+// hold_festival's >=10). The fix re-validates the scaled op and, on
+// failure, falls back to the ORIGINAL unscaled op -- which the caller
+// already validated -- in both directions.
+describe('mediated execution: band-scaled ops re-validate against the unscaled ceiling (T3 critical)', () => {
+  it('boundary affordability: treasury == unscaled cost, forced outstanding -> falls back to the unscaled amount, treasury never negative', () => {
+    // world() treasury is exactly fx('100'). stockpile_grain amount '200' at
+    // GRAIN_PRICE 0.5 costs exactly 100 -- validateOp accepts it against the
+    // pre-op treasury. An 'outstanding' draw scales amount to 260 (x1.3),
+    // costing 130: applied unchecked, treasury goes to -30 (the live repro).
+    const g0 = world(9000); // apt 9000 -> 250/1000 outstanding weight
+    for (let s = 0; s < 50; s++) {
+      const em = makeEmitter(5);
+      const g2 = applyMediatedOp(g0, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '200' }, 5, makeFortune(`out${s}`), em, MED, []);
+      const ex = em.all().find((e) => e.type === 'op.executed');
+      const band = (ex!.data as { band: string }).band;
+      if (band === 'outstanding') {
+        const treasury = propFx(getNode(g2, 'inst:crown').props, 'treasury');
+        expect(treasury >= fx('0')).toBe(true);
+        expect(treasury).toBe(fx('0')); // 100 - (200 * 0.5) -- the unscaled cost, exactly
+        expect(propFx(getNode(g2, 'place:ash').props, 'granary')).toBe(fx('220')); // 20 + 200 unscaled, not +260
+        return;
+      }
+    }
+    throw new Error('no outstanding draw in 50 seeds — widen scan');
+  });
+
+  it('seize at exact wealth: forced outstanding -> falls back to the unscaled amount, target wealth ends exactly 0, never negative', () => {
+    let g0 = world(9000);
+    g0 = addNode(g0, { id: 'char:target', type: 'character', props: { name: 'Target', wealth: fx('50') } });
+    g0 = addNode(g0, { id: 'char:mar', type: 'character', props: { name: 'Marshal', 'apt:martial': 9000 } });
+    g0 = addNode(g0, { id: 'office:marshal', type: 'office', props: { title: 'Marshal' } });
+    g0 = addEdge(g0, { type: 'appointment', src: 'char:mar', dst: 'office:marshal', props: { since: 0 } });
+    for (let s = 0; s < 50; s++) {
+      const em = makeEmitter(5);
+      const g2 = applyMediatedOp(g0, { kind: 'seize', charId: 'char:target', amount: '50' }, 5, makeFortune(`sz${s}`), em, MED, []);
+      const ex = em.all().find((e) => e.type === 'op.executed');
+      const band = (ex!.data as { band: string }).band;
+      if (band === 'outstanding') {
+        const wealth = propFx(getNode(g2, 'char:target').props, 'wealth');
+        expect(wealth >= fx('0')).toBe(true);
+        expect(wealth).toBe(fx('0')); // 50 - 50 unscaled, not 50 - 65
+        return;
+      }
+    }
+    throw new Error('no outstanding draw in 50 seeds — widen scan');
+  });
+
+  it('hold_festival at the validated floor (amount 10): forced poor -> scaling would break the floor, falls back to the unscaled amount, no validation error escapes', () => {
+    let g0 = world(9000);
+    g0 = addNode(g0, { id: 'char:env', type: 'character', props: { name: 'Envoy', 'apt:social': 0 } }); // apt 0 -> 400/1000 poor weight
+    g0 = addNode(g0, { id: 'office:envoy', type: 'office', props: { title: 'Envoy' } });
+    g0 = addEdge(g0, { type: 'appointment', src: 'char:env', dst: 'office:envoy', props: { since: 0 } });
+    for (let s = 0; s < 50; s++) {
+      const em = makeEmitter(5);
+      const g2 = applyMediatedOp(g0, { kind: 'hold_festival', placeId: 'place:ash', amount: '10' }, 5, makeFortune(`hf${s}`), em, MED, []);
+      const ex = em.all().find((e) => e.type === 'op.executed');
+      const band = (ex!.data as { band: string }).band;
+      if (band === 'poor') {
+        // Scaled 10 * 0.6 = 6 would trip validateOp's ">= 10" floor; the
+        // fallback must apply the original amount and emit its event --
+        // no exception, no dropped op.
+        const applied = em.all().find((e) => e.type === 'op.hold_festival');
+        expect(applied).toBeDefined();
+        expect((applied!.data as { amount: string }).amount).toBe('10');
+        expect(propFx(getNode(g2, 'inst:crown').props, 'treasury')).toBe(fx('90')); // 100 - 10 unscaled, not 100 - 6
+        return;
+      }
+    }
+    throw new Error('no poor draw in 50 seeds — widen scan');
   });
 });
