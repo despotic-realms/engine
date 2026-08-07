@@ -171,7 +171,11 @@ export function allegianceLog(props: Props): AllegianceLogEntry[] {
  *  dropping the oldest once the log exceeds ALLEGIANCE_LOG_CAP entries.
  *  Used for every op-driven bp move -- `cause` is that op's own event id,
  *  including for edge CREATION, where `deltaBp` is the edge's initial bp
- *  (there is no prior entry to diff against). */
+ *  (there is no prior entry to diff against). NOTE: the log is a PARTIAL
+ *  reason-trail, not a full decomposition of current bp -- genesis-seeded
+ *  edges carry no log for their starting value, and cap-8 eviction discards
+ *  early entries, so consumers (portrait narration, consequence surfaces)
+ *  must never assume sum(deltaBp) equals current bp. */
 export function appendAllegianceLog(props: Props, tick: number, deltaBp: number, cause: string): AllegianceLogEntry[] {
   const next = [...allegianceLog(props), { tick, deltaBp, cause }];
   return next.length > ALLEGIANCE_LOG_CAP ? next.slice(next.length - ALLEGIANCE_LOG_CAP) : next;

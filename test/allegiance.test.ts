@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { canonJson, hashValue } from '../src/canon.js';
 import { fx } from '../src/fx.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
-import { addNode, findEdge, setNodeProp } from '../src/graph.js';
+import { addNode, findEdge, setEdgeProp, setNodeProp } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
 import { applyOp, validateOp } from '../src/ops.js';
 import { socialStep } from '../src/systems.js';
@@ -159,6 +159,45 @@ describe('allegiance reason logs (spec §5)', () => {
       const logB = findEdge(b, 'grudge', 'char:maud', 'char:ruler')?.props['log'];
       expect(logA).toEqual(logB);
       expect(canonJson(logA)).toBe(canonJson(logB)); // explicit bit-identical check on the log itself, not just the graph hash
+    });
+
+
+
+  });
+
+  describe('exposed-skimmer grudge.kindled instrumentation (spec D14)', () => {
+    it('a lone kindled grudge with fresh edge: concatenated event deltas replay to the same graph', () => {
+      const INTEREST = 'interest:char:osric->inst:crown';
+      const LOYALTY_OSRIC = 'loyalty:char:osric->char:ruler';
+      const GRUDGE_MAUD = 'grudge:char:maud->char:ruler';
+      
+      // Isolate the exposed-skimmer branch by neutralizing other socialStep paths:
+      // set osric loyalty to 5000 (no drift), set maud's grudge to 0 (decay is a no-op),
+      // and set unrest to 0 (no cooling).
+      let g0 = setEdgeProp(thornfieldGraph(), LOYALTY_OSRIC, 'bp', 5000);
+      g0 = setEdgeProp(g0, GRUDGE_MAUD, 'bp', 0);
+      g0 = setNodeProp(g0, 'place:thornfield', 'unrest', fx('0'));
+      g0 = setEdgeProp(g0, INTEREST, 'exposed', true);
+
+      const em = makeEmitter(1);
+      const post = socialStep(g0, 1, em);
+
+      const events = em.all();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.type).toBe('grudge.kindled');
+
+      // Check that the log entry has the correct cause
+      const grudgeEdge = findEdge(post, 'grudge', 'char:osric', 'char:ruler');
+      expect(grudgeEdge?.props['log']).toBeDefined();
+      const log = grudgeEdge?.props['log'] as LogEntry[];
+      expect(log.length).toBeGreaterThan(0);
+      const lastEntry = log[log.length - 1]!;
+      expect(lastEntry.cause).toBe(events[0]!.id);
+
+      const deltas = events.flatMap((e) => e.deltas);
+      expect(deltas.length).toBeGreaterThan(0);
+      const replayed = applyDeltas(g0, deltas);
+      expect(hashValue(replayed)).toBe(hashValue(post));
     });
   });
 });
