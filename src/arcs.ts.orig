@@ -116,6 +116,7 @@ export function advanceCharacterArcs(
         em.emit('arc.poach.bid', { data: { charId, byId: rivalId, offeredWant: want } });
       }
     } else {
+    } else {
       // stage 3: DEPARTURE, terminal. Spec §12: departed characters REMAIN
       // IN THE GRAPH -- only the loyalty edge is cut; appointment edges are
       // also VACATED so the defector cannot remain the crown's hands (a

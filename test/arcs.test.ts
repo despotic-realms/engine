@@ -24,6 +24,7 @@ import { makeFortune } from '../src/fortune.js';
 import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode, setEdgeProp } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
 import type { CharacterArc } from '../src/arcs.js';
+import { applyMediatedOp } from '../src/mediate.js';
 import { advanceCharacterArcs } from '../src/arcs.js';
 import { initialState, resolveTick } from '../src/tick.js';
 import type { ReignState, SeasonConfig } from '../src/tick.js';
@@ -302,3 +303,61 @@ describe('character arcs wired into resolveTick', () => {
     expect(out2.events.some((e) => e.type === 'arc.poach.bid')).toBe(true);
   });
 });
+
+  it('departure vacates appointment edges: an officeholder who departs loses their office', () => {
+    // Fixture: char:x holds office:steward, carries a restless arc
+    let g = withRestlessCandidate(4000);
+    g = addNode(g, { id: 'office:steward', type: 'office', props: { title: 'Steward' } });
+    g = addEdge(g, { type: 'appointment', src: 'char:x', dst: 'office:steward', props: { since: 0 } });
+    
+    let arcs: Record<string, CharacterArc> = {};
+    const RIVAL = 'char:rival';
+
+    // Arm the arc at tick 6
+    let em = makeEmitter(6);
+    let out = advanceCharacterArcs(g, 6, arcs, em, RIVAL);
+    g = out.g;
+    arcs = out.arcs;
+    expect(arcs['restless:char:x']?.stage).toBe(1);
+
+    // Advance to stage 2 at tick 9
+    em = makeEmitter(9);
+    out = advanceCharacterArcs(g, 9, arcs, em, RIVAL);
+    g = out.g;
+    arcs = out.arcs;
+    expect(arcs['restless:char:x']?.stage).toBe(2);
+
+    // Depart at tick 12: stage 3 (terminal)
+    const pre = g;
+    em = makeEmitter(12);
+    out = advanceCharacterArcs(g, 12, arcs, em, RIVAL);
+    g = out.g;
+    arcs = out.arcs;
+
+    // Verify departure event and basic state
+    expect(em.all()).toHaveLength(1);
+    expect(em.all()[0]?.type).toBe('arc.departed');
+    expect(findEdge(g, 'loyalty', 'char:x', 'char:ruler')).toBeUndefined();
+    expect(getNode(g, 'char:x').props['inRivalCourt']).toBe(true);
+    
+    // Verify appointment edge is GONE
+    expect(findEdge(g, 'appointment', 'char:x', 'office:steward')).toBeUndefined();
+    
+    // Verify office node still exists (spec §12 -- offices remain)
+    expect(g.nodes['office:steward']).toBeDefined();
+    
+    // Verify delta replay
+    expect(hashValue(applyDeltas(pre, em.all().flatMap((e) => e.deltas)))).toBe(hashValue(g));
+
+    // Verify mediated op through vacant office rejects with 'no hands'
+    const medConfig: import('../src/mediate.js').MediationConfig = {
+      officeForDomain: { econ: 'office:steward', martial: 'office:marshal', social: 'office:envoy' },
+      willingness: false,
+    };
+    const medEm = makeEmitter(13);
+    const g2 = applyMediatedOp(g, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '5' }, 13, makeFortune('med'), medEm, medConfig, []);
+    expect(g2).toBe(g); // graph unchanged on rejection
+    const rejected = medEm.all().find((e) => e.type === 'op.rejected');
+    expect(rejected).toBeDefined();
+    expect(rejected?.data).toMatchObject({ reason: 'no hands' });
+  });
