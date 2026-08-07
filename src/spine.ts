@@ -4,7 +4,9 @@
 // Callers pass an existing charId; "absent" means a missing prop on an existing node.
 // Behavior for existing nodes is unchanged (absent apt prop → 5000; absent trait → false; wantIndex past end → null).
 import type { WorldGraph } from './graph.js';
-import { getNode } from './graph.js';
+import { findEdge, getNode } from './graph.js';
+import type { Op } from './ops.js';
+import { fx } from './fx.js';
 
 export const APT_KEYS = ['apt:econ', 'apt:martial', 'apt:social', 'apt:judge'] as const;
 export type AptKey = (typeof APT_KEYS)[number];
@@ -38,3 +40,48 @@ export function currentWant(g: WorldGraph, charId: string): string | null {
   const w = chain[idx];
   return typeof w === 'string' ? w : null;
 }
+
+// Rolling wants (spec §2, T7): each want key names a done-detector, run
+// against the op that just applied and the graph AFTER it applied --
+// `safety`'s walls clause needs to read defenseBp off the graph, not just
+// the op's own shape, which is why every predicate takes (g, op, charId)
+// rather than just (op, charId). Callers (resolveTick, see tick.ts's
+// applyOpWithWants) run these ONLY when the op's own deltas actually
+// landed: a botched mediated execution never reaches here, so no predicate
+// needs to re-derive that itself. A predicate answers "would THIS op, if it
+// landed, satisfy charId's want" -- nothing here mutates or emits.
+export type WantFulfillFn = (g: WorldGraph, op: Op, charId: string) => boolean;
+
+export const WANT_FULFILL: Record<WantKey, WantFulfillFn> = {
+  coin: (_g, op, charId) => {
+    if (op.kind !== 'grant' || op.charId !== charId) return false;
+    return fx(op.amount) >= fx('15');
+  },
+  office: (_g, op, charId) => op.kind === 'appoint' && op.charId === charId,
+  pardon: (_g, op, charId) => op.kind === 'pardon' && op.charId === charId,
+  holding: (g, op, charId) => {
+    if (op.kind !== 'invest') return false;
+    return findEdge(g, 'interest', charId, op.placeId) !== undefined; // any project
+  },
+  // Reserved (spec §2): no op in this wave's vocabulary proposes a
+  // marriage, so this never fires. The key stays in WANT_KEYS so content
+  // can already author it into a wantChain -- Stage-2 apparatus content
+  // adds the op that lets it advance.
+  marriage: () => false,
+  revenge: (g, op, charId) => {
+    if (op.kind !== 'imprison' && op.kind !== 'seize') return false;
+    return findEdge(g, 'grudge', charId, op.charId) !== undefined; // charId's own grudge, toward the op's target
+  },
+  recognition: (g, op, charId) => {
+    if (op.kind === 'grant') return op.charId === charId; // any amount, unlike coin's threshold
+    if (op.kind === 'hold_festival') return findEdge(g, 'interest', charId, op.placeId) !== undefined;
+    return false;
+  },
+  safety: (g, op, charId) => {
+    if (op.kind === 'pardon') return op.charId === charId;
+    if (op.kind !== 'invest' || op.project !== 'walls') return false;
+    if (findEdge(g, 'interest', charId, op.placeId) === undefined) return false;
+    const defenseBp = getNode(g, op.placeId).props['defenseBp'];
+    return typeof defenseBp === 'number' && defenseBp >= 2000;
+  },
+};

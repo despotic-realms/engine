@@ -5,10 +5,11 @@
 // reasoning travels SDK → host → sealed store → analyst, never through the
 // world (D16). Free-text directives arrive here already compiled to ops.
 import { hashValue } from './canon.js';
-import type { ChronicleEvent } from './events.js';
-import { makeEmitter } from './events.js';
+import type { ChronicleEvent, Emitter, GraphDelta } from './events.js';
+import { applyDeltas, makeEmitter } from './events.js';
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
+import { getNode, nodeIds } from './graph.js';
 import type { TierRule } from './ladder.js';
 import { applyTransition, checkLadder } from './ladder.js';
 import type { Binding } from './match.js';
@@ -22,7 +23,8 @@ import type { ReportedLedger, Seat } from './report.js';
 import { compileReport } from './report.js';
 import type { ExaminerCalendar } from './scheduler.js';
 import { advanceArcs, examiner } from './scheduler.js';
-import type { Band } from './spine.js';
+import type { Band, WantKey } from './spine.js';
+import { WANT_FULFILL, currentWant } from './spine.js';
 import type { Deck, Storylet } from './storylet.js';
 import { bindOps, eligibleStorylets, renderTpl } from './storylet.js';
 import { economyStep, socialStep } from './systems.js';
@@ -174,6 +176,66 @@ function findStorylet(season: SeasonConfig, id: string): Storylet {
   throw new Error(`no storylet '${id}' in season decks`);
 }
 
+// Rolling wants (spec §2, T7): after an op's own deltas land, every
+// character with a wantChain gets one chance to advance -- sorted by node
+// id so two characters satisfied by the same op (a festival pleasing two
+// interest-holders) chronicle in a stable order. At most one want per
+// character per op: their CURRENT want only, never re-checked after it
+// advances. `parentEventId` cites the event that carried the op's own
+// deltas, mirroring how every other resolveTick emission parents to its
+// cause (e.g. op.skimmed -> executedEventId in mediate.ts).
+function advanceWants(g: WorldGraph, op: Op, tick: number, em: Emitter, parentEventId: string): WorldGraph {
+  let g2 = g;
+  for (const charId of nodeIds(g2)) {
+    const node = getNode(g2, charId);
+    if (!Array.isArray(node.props['wantChain'])) continue;
+    const want = currentWant(g2, charId);
+    if (want === null) continue;
+    const predicate = WANT_FULFILL[want as WantKey];
+    if (!predicate(g2, op, charId)) continue;
+    const idx = node.props['wantIndex'];
+    const nextIndex = (typeof idx === 'number' ? idx : 0) + 1;
+    const deltas: GraphDelta[] = [
+      { op: 'node.set', id: charId, key: 'wantIndex', value: nextIndex },
+      { op: 'node.set', id: charId, key: 'wantSinceTick', value: tick },
+    ];
+    g2 = applyDeltas(g2, deltas);
+    em.emit('want.fulfilled', { parents: [parentEventId], data: { charId, wantKey: want }, deltas });
+  }
+  return g2;
+}
+
+// Applies one op (plain or mediated per the tier's config), then -- ONLY if
+// the op's own deltas actually landed -- runs the want-advance pass above.
+// "Landed" is read off the chronicle itself rather than off
+// applyMediatedOp's return value (just a WorldGraph): a botched mediated
+// draw emits op.executed but never calls applyOp for the underlying op
+// (mediate.ts's `if (band !== 'botched')` guard), so no `op.<kind>` event
+// appears for it -- even though a greedy executor's skim rider CAN still
+// touch the graph on a botched draw, which rules out a cheaper "did g
+// change" check. A refused/rejected op never reaches this function at all
+// (the caller's validateOp/willingness gate already `continue`d or
+// returned before calling it), so those cases need no special handling
+// here: botched is the only "applied a mediated op, nothing landed" case
+// this function has to distinguish.
+function applyOpWithWants(
+  g: WorldGraph,
+  tierCfg: TierConfig,
+  op: Op,
+  tick: number,
+  fortune: Fortune,
+  em: Emitter,
+  parents: string[],
+): WorldGraph {
+  const before = em.all().length;
+  let g2 = tierCfg.mediation
+    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, parents)
+    : applyOp(g, op, tick, em, parents);
+  const landedEvent = em.all().slice(before).find((e) => e.type === `op.${op.kind}`);
+  if (landedEvent) g2 = advanceWants(g2, op, tick, em, landedEvent.id);
+  return g2;
+}
+
 export function resolveTick(
   season: SeasonConfig,
   state: ReignState,
@@ -208,9 +270,7 @@ export function resolveTick(
     for (const op of ops) {
       const r = validateOp(g, op);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
-      g = tierCfg.mediation
-        ? applyMediatedOp(g, r.op, tick, fortune, em, tierCfg.mediation, [decisionEvents.get(choice.briefId)!])
-        : applyOp(g, r.op, tick, em, [decisionEvents.get(choice.briefId)!]);
+      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, [decisionEvents.get(choice.briefId)!]);
     }
   }
 
@@ -228,9 +288,7 @@ export function resolveTick(
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
       const r = validateOp(g, op);
       if (r.ok) {
-        g = tierCfg.mediation
-          ? applyMediatedOp(g, r.op, tick, fortune, em, tierCfg.mediation, [ev.id])
-          : applyOp(g, r.op, tick, em, [ev.id]);
+        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, [ev.id]);
       } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
     }
   }
