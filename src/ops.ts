@@ -33,7 +33,9 @@ export type Op =
   | { kind: 'send_envoy'; charId: string; tone: 'conciliatory' | 'firm' | 'threatening' }
   | { kind: 'seize'; charId: string; amount: string }
   | { kind: 'hold_festival'; placeId: string; amount: string }
-  | { kind: 'record_stance'; stanceId: string; value: 'for' | 'against' };
+  | { kind: 'record_stance'; stanceId: string; value: 'for' | 'against' }
+  | { kind: 'vet'; charId: string }
+  | { kind: 'obscure_records' };
 
 export interface OpParamDesc {
   name: string;
@@ -154,6 +156,16 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
     ],
     domain: null,
   },
+  vet: {
+    summary: 'Vet a character: a true-ish read of their strongest aptitude, through the vetting authority (the spymaster if staffed, else the ruler).',
+    params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+    domain: 'social',
+  },
+  obscure_records: {
+    summary: 'Obscure the court’s records: a rival’s next poach bid targets a stale want instead of the current one.',
+    params: [],
+    domain: 'social',
+  },
 };
 
 export type OpResult = { ok: true; op: Op } | { ok: false; error: string };
@@ -171,6 +183,13 @@ function parseAmount(v: unknown): Fx | string {
 function treasury(g: WorldGraph): Fx {
   return propFx(getNode(g, 'inst:crown').props, 'treasury');
 }
+
+// Task 9 (spec §9): vet's and obscure_records's fixed treasury costs. Named
+// (rather than inlined like hold_festival's bare fx('10') floor) because
+// each is read from TWO places -- validateOp's affordability gate and
+// applyOp's own debit -- and must be the exact same value at both.
+const VET_COST = fx('5');
+const OBSCURE_RECORDS_COST = fx('10');
 
 // Stance ids name a consistency-probe question ('granary-doctrine', not a
 // node): lowercase kebab-case, 1-40 chars, never starting with a hyphen.
@@ -273,6 +292,12 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
     case 'hold_festival':
       if (fx(op['amount'] as string) < fx('10')) return { ok: false, error: 'a festival needs at least 10' };
       if (fx(op['amount'] as string) > t) return { ok: false, error: 'treasury cannot afford it' };
+      break;
+    case 'vet':
+      if (VET_COST > t) return { ok: false, error: 'treasury cannot afford a vetting' };
+      break;
+    case 'obscure_records':
+      if (OBSCURE_RECORDS_COST > t) return { ok: false, error: 'treasury cannot afford counter-intelligence' };
       break;
   }
   return { ok: true, op: op as unknown as Op };
@@ -572,6 +597,27 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const deltas: GraphDelta[] = [{ op: 'node.set', id: 'inst:crown', key: 'stance:' + op.stanceId, value: op.value }];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.record_stance', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'vet': {
+      // The debit is this op's own effect (spec §9: "applyOp: debit
+      // treasury, standard delta+event"). vet's DISTINCTIVE effect -- a
+      // fidelity-modulated read of the target's aptitude -- needs Fortune,
+      // which applyOp doesn't have (like every op here); it's derived from
+      // this landed op.vet event by tick.ts's step 4.5 (see observe.ts's
+      // vetObservation), never here.
+      const deltas: GraphDelta[] = [debitTreasury(g, VET_COST)];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.vet', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'obscure_records': {
+      const deltas: GraphDelta[] = [
+        debitTreasury(g, OBSCURE_RECORDS_COST),
+        { op: 'node.set', id: 'inst:crown', key: 'counterIntel', value: true },
+      ];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.obscure_records', { parents, data: { ...op }, deltas });
       return g2;
     }
   }

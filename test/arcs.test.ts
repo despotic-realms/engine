@@ -184,16 +184,30 @@ describe('advanceCharacterArcs', () => {
     expect(hashValue(applyDeltas(pre, em.all().flatMap((e) => e.deltas)))).toBe(hashValue(g));
   });
 
-  it('a pre-existing scheme-kind arc is left untouched -- restless and scheme are independent per-character slots (Task 9 territory)', () => {
+  // Pre-Task-9, this pinned "arcs.ts doesn't know how to process 'scheme'
+  // yet, so a pre-existing scheme-kind arc is inert no matter its stage" --
+  // hence the original fixture's synthetic stage: 5 (a value no real
+  // lifecycle would ever reach), chosen specifically to prove indifference.
+  // Task 9 now processes 'scheme' arcs for real (test/apparatus.test.ts
+  // owns that machinery's own coverage), so stage: 5 would now hit the
+  // terminal (stage >= 3) strike branch instead of staying untouched --
+  // that was always this test's own forward-reference ("Task 9 territory").
+  // Updated to a REALISTIC not-yet-due scheme arc (stage 1, sinceTick ==
+  // this call's own tick -- 0 ticks elapsed, short of
+  // SCHEME_STAGE_ADVANCE_TICKS) so it is untouched for the correct reason
+  // (not due this tick), while still proving restless/scheme independence:
+  // the SAME call arms char:x's restless slot without disturbing the
+  // scheme slot at all.
+  it('a pre-existing scheme-kind arc not yet due for a stage advance is left untouched -- restless and scheme are independent per-character slots', () => {
     const g = withRestlessCandidate(4000);
     const arcs: Record<string, CharacterArc> = {
-      'scheme:char:x': { kind: 'scheme', charId: 'char:x', stage: 5, sinceTick: 0 },
+      'scheme:char:x': { kind: 'scheme', charId: 'char:x', stage: 1, sinceTick: 6 },
     };
-    const em = makeEmitter(6); // arm-eligible tick for the independent 'restless' slot
+    const em = makeEmitter(6); // arm-eligible tick for the independent 'restless' slot; 0 ticks since the scheme arc's own sinceTick
     const out = advanceCharacterArcs(g, 6, arcs, em);
-    expect(out.arcs['scheme:char:x']).toEqual({ kind: 'scheme', charId: 'char:x', stage: 5, sinceTick: 0 }); // untouched
+    expect(out.arcs['scheme:char:x']).toEqual({ kind: 'scheme', charId: 'char:x', stage: 1, sinceTick: 6 }); // untouched
     expect(out.arcs['restless:char:x']).toEqual({ kind: 'restless', charId: 'char:x', stage: 1, sinceTick: 6 }); // arms independently
-    expect(em.all().map((e) => e.type)).toEqual(['arc.restless']); // no scheme-kind event ever emitted by this module
+    expect(em.all().map((e) => e.type)).toEqual(['arc.restless']); // the scheme arc wasn't due, so it emitted nothing this tick
   });
 
   describe('no-rival variant', () => {

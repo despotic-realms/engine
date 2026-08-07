@@ -28,6 +28,7 @@ describe('spine vocabularies', () => {
       audit: 'econ', grant: 'econ', invest: 'econ', imprison: 'martial', pardon: null,
       raise_levy: 'martial', disband_levy: 'martial', send_envoy: 'social', seize: 'martial',
       hold_festival: 'social', record_stance: null,
+      vet: 'social', obscure_records: 'social', // Task 9, spec §9
     };
     expect(Object.fromEntries(Object.entries(OP_KINDS).map(([k, d]) => [k, d.domain]))).toEqual(expected);
   });

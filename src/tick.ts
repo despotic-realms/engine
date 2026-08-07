@@ -20,7 +20,7 @@ import { applyOp, validateOp } from './ops.js';
 import type { MediationConfig } from './mediate.js';
 import { applyMediatedOp } from './mediate.js';
 import type { Observation } from './observe.js';
-import { observeExecutions } from './observe.js';
+import { observeExecutions, vetObservation } from './observe.js';
 import type { ReportedLedger, Seat } from './report.js';
 import { compileReport } from './report.js';
 import type { ExaminerCalendar } from './scheduler.js';
@@ -370,6 +370,21 @@ export function resolveTick(
     }
   }
 
+  // 4.5b. Vet's direct effect (Task 9, spec §9): unlike the reporter-
+  // mediated observations above, a landed vet op IS its own act of
+  // intelligence-gathering -- it always produces exactly one
+  // observation.received (via: 'vet'), regardless of whether any reporter
+  // seats or mediation are configured (vet is usable from tier 0 onward,
+  // unlike op.executed/op.skimmed above which only ever exist under
+  // mediation). Read off the SAME executionEvents snapshot as step 4.5,
+  // before systems steps 5-7 can drift the graph.
+  for (const ev of executionEvents) {
+    if (ev.type !== 'op.vet') continue;
+    const data = ev.data as { charId: string };
+    const obs = vetObservation(g, data.charId, tick, fortune, ev.id);
+    em.emit('observation.received', { parents: [ev.id], data: { ...obs, via: 'vet' } });
+  }
+
   // 5-7. Systems.
   g = economyStep(g, tick, fortune, em);
   g = socialStep(g, tick, em);
@@ -383,7 +398,7 @@ export function resolveTick(
   // wantSinceTick) -- the two passes are disjoint over the graph, so which
   // runs first can't change either one's outcome, only which of their
   // events would sort first within this tick's chronicle.
-  const arcResult = advanceCharacterArcs(g, tick, arcs, em, season.rivalId);
+  const arcResult = advanceCharacterArcs(g, tick, arcs, em, season.rivalId, season.primaryPlaceId);
   g = arcResult.g;
   arcs = arcResult.arcs;
 
