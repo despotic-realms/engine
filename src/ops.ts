@@ -16,7 +16,7 @@ import type { Emitter, GraphDelta } from './events.js';
 import type { Fx } from './fx.js';
 import { clampFx, divFx, fx, fxToString, fxWhole, mulFx, FX_ZERO } from './fx.js';
 import type { NodeType, WorldGraph } from './graph.js';
-import { edgeId, edgesFrom, edgesTo, findEdge, getNode, propFx, propStr } from './graph.js';
+import { appendAllegianceLog, edgeId, edgesFrom, edgesTo, findEdge, getNode, propFx, propStr } from './graph.js';
 
 export type Op =
   | { kind: 'decree_tax'; placeId: string; rateBp: number }
@@ -361,12 +361,24 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const eid = edgeId('loyalty', op.charId, rulerId);
       const existing = g.edges[eid];
       const cur = typeof existing?.props['bp'] === 'number' ? (existing.props['bp'] as number) : 5000;
-      const deltas: GraphDelta[] = [
-        debitTreasury(g, amount),
-        existing
-          ? { op: 'edge.set', id: eid, key: 'bp', value: clampBp(cur + bpDelta) }
-          : { op: 'edge.add', edge: { id: eid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5000 + bpDelta) } } },
-      ];
+      // nextId()-then-emit (events.ts's contract, mirrored from invest
+      // below): the log's `cause` must cite this arm's own event id, which
+      // isn't known until em.emit() runs at the bottom of the arm -- so it's
+      // pre-allocated here and the only emit() call for this arm is the one
+      // at the end, with nothing else emitted in between.
+      const eventId = em.nextId();
+      const deltas: GraphDelta[] = [debitTreasury(g, amount)];
+      if (existing) {
+        const newBp = clampBp(cur + bpDelta);
+        deltas.push({ op: 'edge.set', id: eid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: eid, key: 'log', value: appendAllegianceLog(existing.props, tick, newBp - cur, eventId) });
+      } else {
+        const newBp = clampBp(5000 + bpDelta);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: eid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
       const g2 = applyDeltas(g, deltas);
       em.emit('op.grant', { parents, data: { ...op, bpDelta }, deltas });
       return g2;
@@ -401,13 +413,20 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const gid = edgeId('grudge', op.charId, rulerId);
       const existingGrudge = g.edges[gid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [{ op: 'node.set', id: op.charId, key: 'imprisoned', value: true }];
       for (const e of edgesFrom(g, op.charId, 'appointment')) deltas.push({ op: 'edge.remove', id: e.id });
-      deltas.push(
-        existingGrudge
-          ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 2500) }
-          : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(2500) } } },
-      );
+      if (existingGrudge) {
+        const newBp = clampBp(curGrudge + 2500);
+        deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+      } else {
+        const newBp = clampBp(2500);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
       const g2 = applyDeltas(g, deltas);
       em.emit('op.imprison', { parents, data: { ...op }, deltas });
       return g2;
@@ -420,13 +439,24 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const existingLoyalty = g.edges[lid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
       const curLoyalty = typeof existingLoyalty?.props['bp'] === 'number' ? (existingLoyalty.props['bp'] as number) : 5000;
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [{ op: 'node.set', id: op.charId, key: 'imprisoned', value: false }];
-      if (existingGrudge) deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge - 1500) });
-      deltas.push(
-        existingLoyalty
-          ? { op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty + 500) }
-          : { op: 'edge.add', edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5500) } } },
-      );
+      if (existingGrudge) {
+        const newBp = clampBp(curGrudge - 1500);
+        deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+      }
+      if (existingLoyalty) {
+        const newBp = clampBp(curLoyalty + 500);
+        deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: lid, key: 'log', value: appendAllegianceLog(existingLoyalty.props, tick, newBp - curLoyalty, eventId) });
+      } else {
+        const newBp = clampBp(5500);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
       const g2 = applyDeltas(g, deltas);
       em.emit('op.pardon', { parents, data: { ...op }, deltas });
       return g2;
@@ -455,24 +485,41 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const existingLoyalty = g.edges[lid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
       const curLoyalty = typeof existingLoyalty?.props['bp'] === 'number' ? (existingLoyalty.props['bp'] as number) : 5000;
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [];
       if (op.tone === 'conciliatory') {
         if (existingGrudge) {
-          deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge - 800) });
+          const newBp = clampBp(curGrudge - 800);
+          deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+        } else if (existingLoyalty) {
+          const newBp = clampBp(curLoyalty + 300);
+          deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: lid, key: 'log', value: appendAllegianceLog(existingLoyalty.props, tick, newBp - curLoyalty, eventId) });
         } else {
-          deltas.push(
-            existingLoyalty
-              ? { op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty + 300) }
-              : { op: 'edge.add', edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5300) } } },
-          );
+          const newBp = clampBp(5300);
+          deltas.push({
+            op: 'edge.add',
+            edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+          });
         }
       } else if (op.tone === 'threatening') {
-        deltas.push(
-          existingGrudge
-            ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 600) }
-            : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(600) } } },
-        );
-        if (existingLoyalty) deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty - 300) });
+        if (existingGrudge) {
+          const newBp = clampBp(curGrudge + 600);
+          deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+        } else {
+          const newBp = clampBp(600);
+          deltas.push({
+            op: 'edge.add',
+            edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+          });
+        }
+        if (existingLoyalty) {
+          const newBp = clampBp(curLoyalty - 300);
+          deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: lid, key: 'log', value: appendAllegianceLog(existingLoyalty.props, tick, newBp - curLoyalty, eventId) });
+        }
       }
       // 'firm' changes posture, not state: no deltas, event only.
       const g2 = applyDeltas(g, deltas);
@@ -486,14 +533,23 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const existingGrudge = g.edges[gid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
       const legitimacy = propFx(getNode(g, 'inst:crown').props, 'legitimacy');
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [
         { op: 'node.set', id: op.charId, key: 'wealth', value: propFx(getNode(g, op.charId).props, 'wealth') - amount },
         { op: 'node.set', id: 'inst:crown', key: 'treasury', value: treasury(g) + amount },
-        existingGrudge
-          ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 2000) }
-          : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(2000) } } },
-        { op: 'node.set', id: 'inst:crown', key: 'legitimacy', value: clampFx(legitimacy - fx('3'), FX_ZERO, fx('100')) },
       ];
+      if (existingGrudge) {
+        const newBp = clampBp(curGrudge + 2000);
+        deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+      } else {
+        const newBp = clampBp(2000);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
+      deltas.push({ op: 'node.set', id: 'inst:crown', key: 'legitimacy', value: clampFx(legitimacy - fx('3'), FX_ZERO, fx('100')) });
       const g2 = applyDeltas(g, deltas);
       em.emit('op.seize', { parents, data: { ...op }, deltas });
       return g2;

@@ -17,7 +17,7 @@ import type { Emitter, GraphDelta } from './events.js';
 import { clampFx, divFx, fx, fxFromInt, fxToString, mulFx, FX_ZERO } from './fx.js';
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
-import { edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, getNode, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
+import { edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, foldAllegianceDrift, getNode, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
 
 const UNREST_MAX = fx('100');
 
@@ -186,17 +186,31 @@ export function socialStep(g0: WorldGraph, tick: number, em: Emitter): WorldGrap
   const clampBp = (bp: number): number => (bp > 10_000 ? 10_000 : bp < 0 ? 0 : bp);
 
   // Loyalty relaxes toward neutral (5000bp) by 100bp/tick, clamped so it
-  // lands exactly on 5000 rather than overshooting and oscillating.
+  // lands exactly on 5000 rather than overshooting and oscillating. The
+  // reason log folds this drift into its single rolling 'time' entry
+  // (spec §5) via the SAME setEdgeProp vehicle as the bp write itself --
+  // no GraphDelta/applyDeltas/emit here, same as the bp write, per this
+  // function's header comment: drift has no discrete chronicle cause, so
+  // replay regenerates it by re-running socialStep, not by reading it back
+  // from events.
   for (const e of edgesOfType(g, 'loyalty')) {
     const bp = typeof e.props['bp'] === 'number' ? (e.props['bp'] as number) : 5000;
     const next = bp < 5000 ? bp + 100 : bp > 5000 ? bp - 100 : bp;
     const adjusted = (bp < 5000 && next > 5000) || (bp > 5000 && next < 5000) ? 5000 : next;
-    if (adjusted !== bp) g = setEdgeProp(g, e.id, 'bp', clampBp(adjusted));
+    if (adjusted !== bp) {
+      const clamped = clampBp(adjusted);
+      g = setEdgeProp(g, e.id, 'bp', clamped);
+      g = setEdgeProp(g, e.id, 'log', foldAllegianceDrift(e.props, tick, clamped - bp));
+    }
   }
-  // Grudges decay by 50bp/tick, floored at 0.
+  // Grudges decay by 50bp/tick, floored at 0. Same rolling-log treatment.
   for (const e of edgesOfType(g, 'grudge')) {
     const bp = typeof e.props['bp'] === 'number' ? (e.props['bp'] as number) : 0;
-    if (bp > 0) g = setEdgeProp(g, e.id, 'bp', bp - 50 < 0 ? 0 : bp - 50);
+    if (bp > 0) {
+      const newBp = bp - 50 < 0 ? 0 : bp - 50;
+      g = setEdgeProp(g, e.id, 'bp', newBp);
+      g = setEdgeProp(g, e.id, 'log', foldAllegianceDrift(e.props, tick, newBp - bp));
+    }
   }
   // Exposed skimmers resent their exposure -- once, latched by
   // grudgeBumped so a second tick of exposure doesn't re-kindle it.
