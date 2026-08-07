@@ -17,7 +17,7 @@ import type { Emitter, GraphDelta } from './events.js';
 import { clampFx, divFx, fx, fxFromInt, fxToString, mulFx, FX_ZERO } from './fx.js';
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
-import { edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, getNode, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
+import { appendAllegianceLog, edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, foldAllegianceDrift, getNode, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
 
 const UNREST_MAX = fx('100');
 
@@ -186,32 +186,51 @@ export function socialStep(g0: WorldGraph, tick: number, em: Emitter): WorldGrap
   const clampBp = (bp: number): number => (bp > 10_000 ? 10_000 : bp < 0 ? 0 : bp);
 
   // Loyalty relaxes toward neutral (5000bp) by 100bp/tick, clamped so it
-  // lands exactly on 5000 rather than overshooting and oscillating.
+  // lands exactly on 5000 rather than overshooting and oscillating. The
+  // reason log folds this drift into its single rolling 'time' entry
+  // (spec §5) via the SAME setEdgeProp vehicle as the bp write itself --
+  // no GraphDelta/applyDeltas/emit here, same as the bp write, per this
+  // function's header comment: drift has no discrete chronicle cause, so
+  // replay regenerates it by re-running socialStep, not by reading it back
+  // from events.
   for (const e of edgesOfType(g, 'loyalty')) {
     const bp = typeof e.props['bp'] === 'number' ? (e.props['bp'] as number) : 5000;
     const next = bp < 5000 ? bp + 100 : bp > 5000 ? bp - 100 : bp;
     const adjusted = (bp < 5000 && next > 5000) || (bp > 5000 && next < 5000) ? 5000 : next;
-    if (adjusted !== bp) g = setEdgeProp(g, e.id, 'bp', clampBp(adjusted));
+    if (adjusted !== bp) {
+      const clamped = clampBp(adjusted);
+      g = setEdgeProp(g, e.id, 'bp', clamped);
+      g = setEdgeProp(g, e.id, 'log', foldAllegianceDrift(e.props, tick, clamped - bp));
+    }
   }
-  // Grudges decay by 50bp/tick, floored at 0.
+  // Grudges decay by 50bp/tick, floored at 0. Same rolling-log treatment.
   for (const e of edgesOfType(g, 'grudge')) {
     const bp = typeof e.props['bp'] === 'number' ? (e.props['bp'] as number) : 0;
-    if (bp > 0) g = setEdgeProp(g, e.id, 'bp', bp - 50 < 0 ? 0 : bp - 50);
+    if (bp > 0) {
+      const newBp = bp - 50 < 0 ? 0 : bp - 50;
+      g = setEdgeProp(g, e.id, 'bp', newBp);
+      g = setEdgeProp(g, e.id, 'log', foldAllegianceDrift(e.props, tick, newBp - bp));
+    }
   }
   // Exposed skimmers resent their exposure -- once, latched by
   // grudgeBumped so a second tick of exposure doesn't re-kindle it.
   const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');
   for (const e of edgesTo(g, 'inst:crown', 'interest')) {
     if (e.props['exposed'] !== true || e.props['grudgeBumped'] === true) continue;
+    const eventId = em.nextId();
     const existing = findEdge(g, 'grudge', e.src, rulerId);
     const bp = typeof existing?.props['bp'] === 'number' ? (existing.props['bp'] as number) : 0;
     const newBp = clampBp(bp + 1500);
-    const deltas: GraphDelta[] = [
-      existing
-        ? { op: 'edge.set', id: existing.id, key: 'bp', value: newBp }
-        : { op: 'edge.add', edge: { id: edgeId('grudge', e.src, rulerId), type: 'grudge', src: e.src, dst: rulerId, props: { bp: newBp } } },
-      { op: 'edge.set', id: e.id, key: 'grudgeBumped', value: true },
-    ];
+    const deltas: GraphDelta[] = existing
+      ? [
+          { op: 'edge.set', id: existing.id, key: 'bp', value: newBp },
+          { op: 'edge.set', id: existing.id, key: 'log', value: appendAllegianceLog(existing.props, tick, newBp - bp, eventId) },
+          { op: 'edge.set', id: e.id, key: 'grudgeBumped', value: true },
+        ]
+      : [
+          { op: 'edge.add', edge: { id: edgeId('grudge', e.src, rulerId), type: 'grudge', src: e.src, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } } },
+          { op: 'edge.set', id: e.id, key: 'grudgeBumped', value: true },
+        ];
     g = applyDeltas(g, deltas);
     em.emit('grudge.kindled', { deltas, data: { holder: e.src, against: rulerId, cause: 'exposed' } });
   }

@@ -8,7 +8,7 @@ export type NodeId = string;
 export type EdgeId = string;
 export type NodeType = 'character' | 'faction' | 'place' | 'office' | 'institution' | 'project';
 export type EdgeType = 'grudge' | 'loyalty' | 'kinship' | 'debt' | 'appointment' | 'route' | 'interest';
-export type PropValue = bigint | number | string | boolean;
+export type PropValue = bigint | number | string | boolean | PropValue[] | { [key: string]: PropValue };
 export type Props = Record<string, PropValue>;
 
 export interface WorldNode { readonly id: NodeId; readonly type: NodeType; readonly props: Props }
@@ -125,4 +125,75 @@ export function propBool(p: Props, key: string): boolean {
   const v = p[key];
   if (typeof v !== 'boolean') throw new Error(`prop '${key}' is not boolean`);
   return v;
+}
+
+// Allegiance reason log (spec §5): loyalty/grudge edges remember WHY their
+// bp moved -- consequence-visibility's data layer ("Mair: -800, your
+// ruling, tick 4") and the voice layer's future raw material. Lives on the
+// edge's `log` prop, an array of `{tick, deltaBp, cause}` -- legal and
+// canonically serializable only because PropValue was widened recursively
+// (T1) precisely for this. Capped at ALLEGIANCE_LOG_CAP entries, newest
+// last, oldest dropped once the cap is exceeded. `cause` is either the id
+// of the event whose deltas carried an op-driven bp change, or the literal
+// 'time' for socialStep's continuous drift, which collapses into a single
+// rolling entry instead of one row per tick (see foldAllegianceDrift).
+export const ALLEGIANCE_LOG_CAP = 8;
+
+export interface AllegianceLogEntry {
+  readonly tick: number;
+  readonly deltaBp: number;
+  readonly cause: string;
+  // A structural index signature, not a semantic "arbitrary extra keys are
+  // welcome" -- required so this interface (closed to tick/deltaBp/cause in
+  // practice) satisfies PropValue's `{ [key: string]: PropValue }` arm: a
+  // named type without one isn't assignable there even when every declared
+  // property already fits, which is what a plain fresh object literal gets
+  // for free but a named interface reference does not.
+  [key: string]: PropValue;
+}
+
+function isAllegianceLogEntry(v: PropValue): v is { tick: number; deltaBp: number; cause: string } {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const r = v as Record<string, PropValue>;
+  return typeof r['tick'] === 'number' && typeof r['deltaBp'] === 'number' && typeof r['cause'] === 'string';
+}
+
+/** Reads an edge's `log` prop back as typed entries. Absent (never written)
+ *  or malformed reads as empty -- the same "absent means default" contract
+ *  propFx/propInt/propStr/propBool use for scalar props, extended to this
+ *  structured one. */
+export function allegianceLog(props: Props): AllegianceLogEntry[] {
+  const raw = props['log'];
+  return Array.isArray(raw) ? raw.filter(isAllegianceLogEntry) : [];
+}
+
+/** Append a fresh, discretely-caused log entry at the end (newest last),
+ *  dropping the oldest once the log exceeds ALLEGIANCE_LOG_CAP entries.
+ *  Used for every op-driven bp move -- `cause` is that op's own event id,
+ *  including for edge CREATION, where `deltaBp` is the edge's initial bp
+ *  (there is no prior entry to diff against). NOTE: the log is a PARTIAL
+ *  reason-trail, not a full decomposition of current bp -- genesis-seeded
+ *  edges carry no log for their starting value, and cap-8 eviction discards
+ *  early entries, so consumers (portrait narration, consequence surfaces)
+ *  must never assume sum(deltaBp) equals current bp. */
+export function appendAllegianceLog(props: Props, tick: number, deltaBp: number, cause: string): AllegianceLogEntry[] {
+  const next = [...allegianceLog(props), { tick, deltaBp, cause }];
+  return next.length > ALLEGIANCE_LOG_CAP ? next.slice(next.length - ALLEGIANCE_LOG_CAP) : next;
+}
+
+/** Fold a socialStep drift tick into the log's single rolling `cause:
+ *  'time'` entry: if one already exists, update it IN PLACE (summed
+ *  deltaBp, refreshed tick) so it keeps its narrative position among
+ *  discrete-cause entries rather than jumping to the end when it next
+ *  changes; otherwise append a fresh one, subject to the same cap as any
+ *  other append. In-place update preserves the narrative order of discrete
+ *  causes -- a rolling drift entry re-sorting itself to "now" every tick
+ *  would otherwise bury older discrete reasons under it repeatedly. */
+export function foldAllegianceDrift(props: Props, tick: number, deltaBp: number): AllegianceLogEntry[] {
+  const log = allegianceLog(props);
+  const idx = log.findIndex((e) => e.cause === 'time');
+  if (idx === -1) return appendAllegianceLog(props, tick, deltaBp, 'time');
+  const next = [...log];
+  next[idx] = { tick, deltaBp: next[idx]!.deltaBp + deltaBp, cause: 'time' };
+  return next;
 }

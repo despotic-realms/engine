@@ -16,7 +16,7 @@ import type { Emitter, GraphDelta } from './events.js';
 import type { Fx } from './fx.js';
 import { clampFx, divFx, fx, fxToString, fxWhole, mulFx, FX_ZERO } from './fx.js';
 import type { NodeType, WorldGraph } from './graph.js';
-import { edgeId, edgesFrom, edgesTo, findEdge, getNode, propFx, propStr } from './graph.js';
+import { appendAllegianceLog, edgeId, edgesFrom, edgesTo, findEdge, getNode, propFx, propStr } from './graph.js';
 
 export type Op =
   | { kind: 'decree_tax'; placeId: string; rateBp: number }
@@ -33,7 +33,9 @@ export type Op =
   | { kind: 'send_envoy'; charId: string; tone: 'conciliatory' | 'firm' | 'threatening' }
   | { kind: 'seize'; charId: string; amount: string }
   | { kind: 'hold_festival'; placeId: string; amount: string }
-  | { kind: 'record_stance'; stanceId: string; value: 'for' | 'against' };
+  | { kind: 'record_stance'; stanceId: string; value: 'for' | 'against' }
+  | { kind: 'vet'; charId: string }
+  | { kind: 'obscure_records' };
 
 export interface OpParamDesc {
   name: string;
@@ -44,13 +46,14 @@ export interface OpParamDesc {
   values?: readonly string[];
 }
 
-export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc[] }> = {
+export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc[]; domain: 'econ' | 'martial' | 'social' | null }> = {
   decree_tax: {
     summary: 'Set the tax rate of a holding (basis points of harvest).',
     params: [
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'rateBp', type: 'int', min: 0, max: 10000 },
     ],
+    domain: 'econ',
   },
   release_grain: {
     summary: 'Open the granary: move grain to the dole.',
@@ -58,6 +61,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   stockpile_grain: {
     summary: 'Buy grain into the granary at market price.',
@@ -65,6 +69,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   appoint: {
     summary: 'Appoint a character to an office, replacing any holder.',
@@ -72,10 +77,12 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'officeId', type: 'nodeId', nodeType: 'office' },
     ],
+    domain: null,
   },
   audit: {
     summary: 'Audit an office. Costs AUDIT_COST. Exposes hidden skimming.',
     params: [{ name: 'officeId', type: 'nodeId', nodeType: 'office' }],
+    domain: 'econ',
   },
   grant: {
     summary: 'Grant treasury to a character; buys loyalty at 2.5bp per unit.',
@@ -83,6 +90,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   invest: {
     summary: 'Fund a project that matures in INVEST_MATURITY_TICKS ticks.',
@@ -91,14 +99,17 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'project', type: 'enum', values: ['irrigation', 'roads', 'walls'] },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'econ',
   },
   imprison: {
     summary: 'Imprison a character: offices vacated, a grudge kindled.',
     params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+    domain: 'martial',
   },
   pardon: {
     summary: 'Release an imprisoned character; cools their grudge, warms loyalty.',
     params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+    domain: null,
   },
   raise_levy: {
     summary: 'Raise militia at a holding (LEVY_RAISE_COST per unit; upkeep accrues).',
@@ -106,10 +117,12 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'size', type: 'fx' },
     ],
+    domain: 'martial',
   },
   disband_levy: {
     summary: 'Disband a holding’s levy entirely.',
     params: [{ name: 'placeId', type: 'nodeId', nodeType: 'place' }],
+    domain: 'martial',
   },
   send_envoy: {
     summary: 'Send an envoy to a character; tone moves grudge/loyalty deterministically.',
@@ -117,6 +130,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'tone', type: 'enum', values: ['conciliatory', 'firm', 'threatening'] },
     ],
+    domain: 'social',
   },
   seize: {
     summary: 'Seize part of a character’s wealth; kindles a grudge, costs legitimacy.',
@@ -124,6 +138,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'charId', type: 'nodeId', nodeType: 'character' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'martial',
   },
   hold_festival: {
     summary: 'Spend treasury on public festivity; unrest eases by amount/8.',
@@ -131,6 +146,7 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'placeId', type: 'nodeId', nodeType: 'place' },
       { name: 'amount', type: 'fx' },
     ],
+    domain: 'social',
   },
   record_stance: {
     summary: 'Record the throne’s stance on a named question; the chronicle and later storylets read it.',
@@ -138,6 +154,17 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
       { name: 'stanceId', type: 'stanceId' },
       { name: 'value', type: 'enum', values: ['for', 'against'] },
     ],
+    domain: null,
+  },
+  vet: {
+    summary: 'Vet a character: a true-ish read of their strongest aptitude, through the vetting authority (the spymaster if staffed, else the ruler).',
+    params: [{ name: 'charId', type: 'nodeId', nodeType: 'character' }],
+    domain: 'social',
+  },
+  obscure_records: {
+    summary: 'Obscure the court’s records: a rival’s next poach bid targets a stale want instead of the current one.',
+    params: [],
+    domain: 'social',
   },
 };
 
@@ -156,6 +183,13 @@ function parseAmount(v: unknown): Fx | string {
 function treasury(g: WorldGraph): Fx {
   return propFx(getNode(g, 'inst:crown').props, 'treasury');
 }
+
+// Task 9 (spec §9): vet's and obscure_records's fixed treasury costs. Named
+// (rather than inlined like hold_festival's bare fx('10') floor) because
+// each is read from TWO places -- validateOp's affordability gate and
+// applyOp's own debit -- and must be the exact same value at both.
+const VET_COST = fx('5');
+const OBSCURE_RECORDS_COST = fx('10');
 
 // Stance ids name a consistency-probe question ('granary-doctrine', not a
 // node): lowercase kebab-case, 1-40 chars, never starting with a hyphen.
@@ -259,6 +293,12 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
       if (fx(op['amount'] as string) < fx('10')) return { ok: false, error: 'a festival needs at least 10' };
       if (fx(op['amount'] as string) > t) return { ok: false, error: 'treasury cannot afford it' };
       break;
+    case 'vet':
+      if (VET_COST > t) return { ok: false, error: 'treasury cannot afford a vetting' };
+      break;
+    case 'obscure_records':
+      if (OBSCURE_RECORDS_COST > t) return { ok: false, error: 'treasury cannot afford counter-intelligence' };
+      break;
   }
   return { ok: true, op: op as unknown as Op };
 }
@@ -346,12 +386,24 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const eid = edgeId('loyalty', op.charId, rulerId);
       const existing = g.edges[eid];
       const cur = typeof existing?.props['bp'] === 'number' ? (existing.props['bp'] as number) : 5000;
-      const deltas: GraphDelta[] = [
-        debitTreasury(g, amount),
-        existing
-          ? { op: 'edge.set', id: eid, key: 'bp', value: clampBp(cur + bpDelta) }
-          : { op: 'edge.add', edge: { id: eid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5000 + bpDelta) } } },
-      ];
+      // nextId()-then-emit (events.ts's contract, mirrored from invest
+      // below): the log's `cause` must cite this arm's own event id, which
+      // isn't known until em.emit() runs at the bottom of the arm -- so it's
+      // pre-allocated here and the only emit() call for this arm is the one
+      // at the end, with nothing else emitted in between.
+      const eventId = em.nextId();
+      const deltas: GraphDelta[] = [debitTreasury(g, amount)];
+      if (existing) {
+        const newBp = clampBp(cur + bpDelta);
+        deltas.push({ op: 'edge.set', id: eid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: eid, key: 'log', value: appendAllegianceLog(existing.props, tick, newBp - cur, eventId) });
+      } else {
+        const newBp = clampBp(5000 + bpDelta);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: eid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
       const g2 = applyDeltas(g, deltas);
       em.emit('op.grant', { parents, data: { ...op, bpDelta }, deltas });
       return g2;
@@ -386,13 +438,20 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const gid = edgeId('grudge', op.charId, rulerId);
       const existingGrudge = g.edges[gid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [{ op: 'node.set', id: op.charId, key: 'imprisoned', value: true }];
       for (const e of edgesFrom(g, op.charId, 'appointment')) deltas.push({ op: 'edge.remove', id: e.id });
-      deltas.push(
-        existingGrudge
-          ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 2500) }
-          : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(2500) } } },
-      );
+      if (existingGrudge) {
+        const newBp = clampBp(curGrudge + 2500);
+        deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+      } else {
+        const newBp = clampBp(2500);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
       const g2 = applyDeltas(g, deltas);
       em.emit('op.imprison', { parents, data: { ...op }, deltas });
       return g2;
@@ -405,13 +464,24 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const existingLoyalty = g.edges[lid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
       const curLoyalty = typeof existingLoyalty?.props['bp'] === 'number' ? (existingLoyalty.props['bp'] as number) : 5000;
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [{ op: 'node.set', id: op.charId, key: 'imprisoned', value: false }];
-      if (existingGrudge) deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge - 1500) });
-      deltas.push(
-        existingLoyalty
-          ? { op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty + 500) }
-          : { op: 'edge.add', edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5500) } } },
-      );
+      if (existingGrudge) {
+        const newBp = clampBp(curGrudge - 1500);
+        deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+      }
+      if (existingLoyalty) {
+        const newBp = clampBp(curLoyalty + 500);
+        deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: lid, key: 'log', value: appendAllegianceLog(existingLoyalty.props, tick, newBp - curLoyalty, eventId) });
+      } else {
+        const newBp = clampBp(5500);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
       const g2 = applyDeltas(g, deltas);
       em.emit('op.pardon', { parents, data: { ...op }, deltas });
       return g2;
@@ -440,24 +510,41 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const existingLoyalty = g.edges[lid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
       const curLoyalty = typeof existingLoyalty?.props['bp'] === 'number' ? (existingLoyalty.props['bp'] as number) : 5000;
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [];
       if (op.tone === 'conciliatory') {
         if (existingGrudge) {
-          deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge - 800) });
+          const newBp = clampBp(curGrudge - 800);
+          deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+        } else if (existingLoyalty) {
+          const newBp = clampBp(curLoyalty + 300);
+          deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: lid, key: 'log', value: appendAllegianceLog(existingLoyalty.props, tick, newBp - curLoyalty, eventId) });
         } else {
-          deltas.push(
-            existingLoyalty
-              ? { op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty + 300) }
-              : { op: 'edge.add', edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: clampBp(5300) } } },
-          );
+          const newBp = clampBp(5300);
+          deltas.push({
+            op: 'edge.add',
+            edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+          });
         }
       } else if (op.tone === 'threatening') {
-        deltas.push(
-          existingGrudge
-            ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 600) }
-            : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(600) } } },
-        );
-        if (existingLoyalty) deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: clampBp(curLoyalty - 300) });
+        if (existingGrudge) {
+          const newBp = clampBp(curGrudge + 600);
+          deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+        } else {
+          const newBp = clampBp(600);
+          deltas.push({
+            op: 'edge.add',
+            edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+          });
+        }
+        if (existingLoyalty) {
+          const newBp = clampBp(curLoyalty - 300);
+          deltas.push({ op: 'edge.set', id: lid, key: 'bp', value: newBp });
+          deltas.push({ op: 'edge.set', id: lid, key: 'log', value: appendAllegianceLog(existingLoyalty.props, tick, newBp - curLoyalty, eventId) });
+        }
       }
       // 'firm' changes posture, not state: no deltas, event only.
       const g2 = applyDeltas(g, deltas);
@@ -471,14 +558,23 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const existingGrudge = g.edges[gid];
       const curGrudge = typeof existingGrudge?.props['bp'] === 'number' ? (existingGrudge.props['bp'] as number) : 0;
       const legitimacy = propFx(getNode(g, 'inst:crown').props, 'legitimacy');
+      const eventId = em.nextId();
       const deltas: GraphDelta[] = [
         { op: 'node.set', id: op.charId, key: 'wealth', value: propFx(getNode(g, op.charId).props, 'wealth') - amount },
         { op: 'node.set', id: 'inst:crown', key: 'treasury', value: treasury(g) + amount },
-        existingGrudge
-          ? { op: 'edge.set', id: gid, key: 'bp', value: clampBp(curGrudge + 2000) }
-          : { op: 'edge.add', edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: clampBp(2000) } } },
-        { op: 'node.set', id: 'inst:crown', key: 'legitimacy', value: clampFx(legitimacy - fx('3'), FX_ZERO, fx('100')) },
       ];
+      if (existingGrudge) {
+        const newBp = clampBp(curGrudge + 2000);
+        deltas.push({ op: 'edge.set', id: gid, key: 'bp', value: newBp });
+        deltas.push({ op: 'edge.set', id: gid, key: 'log', value: appendAllegianceLog(existingGrudge.props, tick, newBp - curGrudge, eventId) });
+      } else {
+        const newBp = clampBp(2000);
+        deltas.push({
+          op: 'edge.add',
+          edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
+        });
+      }
+      deltas.push({ op: 'node.set', id: 'inst:crown', key: 'legitimacy', value: clampFx(legitimacy - fx('3'), FX_ZERO, fx('100')) });
       const g2 = applyDeltas(g, deltas);
       em.emit('op.seize', { parents, data: { ...op }, deltas });
       return g2;
@@ -501,6 +597,27 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const deltas: GraphDelta[] = [{ op: 'node.set', id: 'inst:crown', key: 'stance:' + op.stanceId, value: op.value }];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.record_stance', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'vet': {
+      // The debit is this op's own effect (spec §9: "applyOp: debit
+      // treasury, standard delta+event"). vet's DISTINCTIVE effect -- a
+      // fidelity-modulated read of the target's aptitude -- needs Fortune,
+      // which applyOp doesn't have (like every op here); it's derived from
+      // this landed op.vet event by tick.ts's step 4.5 (see observe.ts's
+      // vetObservation), never here.
+      const deltas: GraphDelta[] = [debitTreasury(g, VET_COST)];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.vet', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'obscure_records': {
+      const deltas: GraphDelta[] = [
+        debitTreasury(g, OBSCURE_RECORDS_COST),
+        { op: 'node.set', id: 'inst:crown', key: 'counterIntel', value: true },
+      ];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.obscure_records', { parents, data: { ...op }, deltas });
       return g2;
     }
   }

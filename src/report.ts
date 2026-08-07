@@ -8,6 +8,7 @@ import { fx, fxToString, mulFx } from './fx.js';
 import type { Fortune } from './fortune.js';
 import type { NodeId, WorldGraph } from './graph.js';
 import { findEdge, getNode, propFx, propStr } from './graph.js';
+import type { Observation } from './observe.js';
 
 export interface Seat {
   id: string;
@@ -27,6 +28,7 @@ export interface ReportedLedger {
   granary: string;
   unrest: UnrestBucket;
   notes: string[];
+  observations: Observation[];
 }
 
 const BUCKETS: UnrestBucket[] = ['calm', 'uneasy', 'restive', 'boiling'];
@@ -44,6 +46,7 @@ export function compileReport(
   tick: number,
   placeId: NodeId,
   reporter: Seat,
+  observations: Observation[] = [],
 ): ReportedLedger {
   const crown = getNode(g, 'inst:crown');
   const place = getNode(g, placeId);
@@ -75,5 +78,6 @@ export function compileReport(
     granary: fxToString(granary),
     unrest: BUCKETS[bucket]!,
     notes,
+    observations,
   };
 }
