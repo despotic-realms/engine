@@ -17,15 +17,15 @@ import { initialState, resolveTick } from '../src/tick.js';
 import type { SeasonConfig, TierConfig } from '../src/tick.js';
 
 // A small fixture graph with a couple of characters, an office, and two
-// places (one already fortified) -- enough surface for every predicate's
-// positive and negative branches without dragging in a full season.
+// places -- enough surface for every predicate's positive and negative
+// branches without dragging in a full season.
 function predicateGraph(): WorldGraph {
   let g = emptyGraph();
   g = addNode(g, { id: 'char:x', type: 'character', props: { name: 'X' } });
   g = addNode(g, { id: 'char:y', type: 'character', props: { name: 'Y' } });
   g = addNode(g, { id: 'office:o', type: 'office', props: { title: 'Office' } });
-  g = addNode(g, { id: 'place:p', type: 'place', props: { name: 'P', defenseBp: 0 } });
-  g = addNode(g, { id: 'place:q', type: 'place', props: { name: 'Q', defenseBp: 3000 } }); // already well-fortified
+  g = addNode(g, { id: 'place:p', type: 'place', props: { name: 'P' } });
+  g = addNode(g, { id: 'place:q', type: 'place', props: { name: 'Q' } });
   return g;
 }
 
@@ -86,14 +86,13 @@ describe('WANT_FULFILL predicates (spec §2)', () => {
     expect(WANT_FULFILL.recognition(g, { kind: 'hold_festival', placeId: 'place:q', amount: '10' }, 'char:x')).toBe(false); // no interest in q
   });
 
-  it('safety: pardon targeting charId, or invest walls at an interest-held place with defenseBp >= 2000', () => {
+  it('safety: pardon targeting charId, or invest walls at a place charId holds an interest edge to (T7 review: no defenseBp gate)', () => {
     let g = predicateGraph();
-    g = addEdge(g, { type: 'interest', src: 'char:x', dst: 'place:p', props: {} }); // defenseBp 0
-    g = addEdge(g, { type: 'interest', src: 'char:x', dst: 'place:q', props: {} }); // defenseBp 3000
+    g = addEdge(g, { type: 'interest', src: 'char:x', dst: 'place:p', props: {} }); // char:x's interest is in P only
     expect(WANT_FULFILL.safety(g, { kind: 'pardon', charId: 'char:x' }, 'char:x')).toBe(true);
-    expect(WANT_FULFILL.safety(g, { kind: 'invest', placeId: 'place:q', project: 'walls', amount: '10' }, 'char:x')).toBe(true); // 3000 >= 2000
-    expect(WANT_FULFILL.safety(g, { kind: 'invest', placeId: 'place:p', project: 'walls', amount: '10' }, 'char:x')).toBe(false); // 0 < 2000
-    expect(WANT_FULFILL.safety(g, { kind: 'invest', placeId: 'place:q', project: 'roads', amount: '10' }, 'char:x')).toBe(false); // wrong project
+    expect(WANT_FULFILL.safety(g, { kind: 'invest', placeId: 'place:p', project: 'walls', amount: '10' }, 'char:x')).toBe(true); // walls at the interest place
+    expect(WANT_FULFILL.safety(g, { kind: 'invest', placeId: 'place:q', project: 'walls', amount: '10' }, 'char:x')).toBe(false); // walls, but NOT an interest place
+    expect(WANT_FULFILL.safety(g, { kind: 'invest', placeId: 'place:p', project: 'roads', amount: '10' }, 'char:x')).toBe(false); // interest place, wrong project
   });
 });
 
@@ -235,7 +234,11 @@ describe('resolveTick wiring: chain end (spec §2, T7)', () => {
 describe('resolveTick wiring: botched mediated ops fulfill nothing (spec §2, T7)', () => {
   it('want.fulfilled tracks exactly whether the underlying op landed -- a botched band draw applies nothing, so nothing is "done"', () => {
     let g = baseGraph();
-    g = addNode(g, { id: 'char:x', type: 'character', props: { name: 'X', wantChain: ['coin'], wantIndex: 0 } });
+    // 'recognition', not 'coin': it fulfills on ANY landed grant amount
+    // (T7 review put an amount threshold on 'coin' -- see the realized-amount
+    // describe block below), so this test isolates landed-vs-botched cleanly
+    // without also depending on which band the scan happened to draw.
+    g = addNode(g, { id: 'char:x', type: 'character', props: { name: 'X', wantChain: ['recognition'], wantIndex: 0 } });
     g = addNode(g, { id: 'char:steward', type: 'character', props: { name: 'Steward', 'apt:econ': 0 } }); // apt 0 -> ~20% botched
     g = addNode(g, { id: 'office:steward', type: 'office', props: { title: 'Steward' } });
     g = addEdge(g, { type: 'appointment', src: 'char:steward', dst: 'office:steward', props: { since: 0 } });
@@ -266,5 +269,59 @@ describe('resolveTick wiring: botched mediated ops fulfill nothing (spec §2, T7
     // "pass" on a lucky draw) if 100 seeds never touched one side.
     expect(sawBotched).toBe(true);
     expect(sawLanded).toBe(true);
+  });
+});
+
+// --- T7 review fix: coin must read the REALIZED (post-band) amount, not
+// the DECIDED one -- a mediated grant that lands band-scaled below fx('15')
+// must NOT fulfill 'coin' even though the op itself landed (op.grant fired).
+// Mirrors the botched-scan self-guard idiom directly above: scan seeds,
+// bucket by drawn band, and fail loudly if either bucket this test cares
+// about (poor / sound-or-outstanding) was never actually observed.
+describe('resolveTick wiring: coin reads the REALIZED amount (T7 review)', () => {
+  it('a mediated grant of 20 through a low-aptitude executor: poor band (x0.6 -> 12) does not fulfill coin though the op lands; sound/outstanding (>= 15 realized) does', () => {
+    let g = baseGraph();
+    g = addNode(g, { id: 'char:x', type: 'character', props: { name: 'X', wantChain: ['coin'], wantIndex: 0 } });
+    g = addNode(g, { id: 'char:steward', type: 'character', props: { name: 'Steward', 'apt:econ': 0 } }); // apt 0 -> poor/sound both common, some botched
+    g = addNode(g, { id: 'office:steward', type: 'office', props: { title: 'Steward' } });
+    g = addEdge(g, { type: 'appointment', src: 'char:steward', dst: 'office:steward', props: { since: 0 } });
+    const season = wantSeason(g, {
+      mediation: { officeForDomain: { econ: 'office:steward', martial: 'office:none', social: 'office:none' }, willingness: false },
+    });
+    const { out, brief } = firstBrief(season, 'realized-amount-setup');
+
+    let sawPoorUnfulfilled = false;
+    let sawLandedFulfilled = false;
+    for (let s = 0; s < 100; s++) {
+      const next = resolveTick(season, out.state, {
+        seatId: 'seat:throne',
+        choices: [{ briefId: brief.briefId, ops: [{ kind: 'grant', charId: 'char:x', amount: '20' }], via: 'directive' }],
+      }, makeFortune(`realized-scan-${s}`));
+
+      const executed = next.events.find((e) => e.type === 'op.executed');
+      expect(executed).toBeDefined();
+      const band = (executed!.data as { band: string }).band;
+      if (band === 'botched') continue; // covered by the landed/botched wiring test above -- not this test's concern
+
+      const grantEvent = next.events.find((e) => e.type === 'op.grant');
+      expect(grantEvent).toBeDefined(); // poor/sound/outstanding all land
+      const realized = (grantEvent!.data as { amount: string }).amount;
+
+      if (band === 'poor') {
+        expect(fx(realized)).toBe(fx('12')); // 20 * 0.6, below the 15 threshold
+        expect(next.events.some((e) => e.type === 'want.fulfilled')).toBe(false);
+        expect(getNode(next.state.graph, 'char:x').props['wantIndex']).toBe(0);
+        sawPoorUnfulfilled = true;
+      } else {
+        expect(fx(realized) >= fx('15')).toBe(true); // sound (20) or outstanding (26)
+        expect(next.events.some((e) => e.type === 'want.fulfilled')).toBe(true);
+        expect(getNode(next.state.graph, 'char:x').props['wantIndex']).toBe(1);
+        sawLandedFulfilled = true;
+      }
+    }
+    // Sanity on the scan itself, not the feature: fail loudly (not silently
+    // "pass" on a lucky draw) if 100 seeds never touched one side.
+    expect(sawPoorUnfulfilled).toBe(true);
+    expect(sawLandedFulfilled).toBe(true);
   });
 });

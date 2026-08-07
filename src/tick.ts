@@ -183,13 +183,15 @@ function findStorylet(season: SeasonConfig, id: string): Storylet {
 // character per op: their CURRENT want only, never re-checked after it
 // advances. `parentEventId` cites the event that carried the op's own
 // deltas, mirroring how every other resolveTick emission parents to its
-// cause (e.g. op.skimmed -> executedEventId in mediate.ts).
+// cause (e.g. op.skimmed -> executedEventId in mediate.ts). `op` here is
+// whatever applyOpWithWants passes in below -- since the T7 review, that's
+// the LANDED op (landedOp()'s reconstruction), not necessarily the DECIDED
+// one.
 function advanceWants(g: WorldGraph, op: Op, tick: number, em: Emitter, parentEventId: string): WorldGraph {
   let g2 = g;
   for (const charId of nodeIds(g2)) {
     const node = getNode(g2, charId);
-    if (!Array.isArray(node.props['wantChain'])) continue;
-    const want = currentWant(g2, charId);
+    const want = currentWant(g2, charId); // null both when wantChain isn't an array and past its end
     if (want === null) continue;
     const predicate = WANT_FULFILL[want as WantKey];
     if (!predicate(g2, op, charId)) continue;
@@ -203,6 +205,28 @@ function advanceWants(g: WorldGraph, op: Op, tick: number, em: Emitter, parentEv
     em.emit('want.fulfilled', { parents: [parentEventId], data: { charId, wantKey: want }, deltas });
   }
   return g2;
+}
+
+// T7 review fix: want predicates must see the REALIZED op, not the DECIDED
+// one. A mediated op can land band-scaled below what the throne originally
+// proposed (mediate.ts's scaleOp) -- `coin`'s >= fx('15') threshold has to
+// read what actually arrived, not what was asked for, or a skimmed-down
+// grant landing under the threshold would still satisfy it. Every applyOp
+// arm spreads the op it was actually called with into its own landed
+// event's data (e.g. op.grant's `data: { ...op, bpDelta }` carries the
+// band-scaled amount when mediation scaled it), so this rebuilds the
+// evaluated op from the DECIDED op with only its amount/size overridden by
+// what the landed event recorded. Deliberately minimal rather than
+// `{ kind: op.kind, ...landedEvent.data }`: several arms' data carries
+// extra kind-specific fields (op.grant's bpDelta, op.audit's
+// found/skimmed/holder, ...) that don't belong on the Op union and would
+// fight its discriminated shape if spread in wholesale.
+function landedOp(op: Op, data: Record<string, unknown>): Op {
+  const amount = data['amount'];
+  if ('amount' in op && typeof amount === 'string') return { ...op, amount };
+  const size = data['size'];
+  if ('size' in op && typeof size === 'string') return { ...op, size };
+  return op;
 }
 
 // Applies one op (plain or mediated per the tier's config), then -- ONLY if
@@ -232,7 +256,7 @@ function applyOpWithWants(
     ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, parents)
     : applyOp(g, op, tick, em, parents);
   const landedEvent = em.all().slice(before).find((e) => e.type === `op.${op.kind}`);
-  if (landedEvent) g2 = advanceWants(g2, op, tick, em, landedEvent.id);
+  if (landedEvent) g2 = advanceWants(g2, landedOp(op, landedEvent.data), tick, em, landedEvent.id);
   return g2;
 }
 

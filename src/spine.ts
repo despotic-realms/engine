@@ -43,13 +43,17 @@ export function currentWant(g: WorldGraph, charId: string): string | null {
 
 // Rolling wants (spec §2, T7): each want key names a done-detector, run
 // against the op that just applied and the graph AFTER it applied --
-// `safety`'s walls clause needs to read defenseBp off the graph, not just
-// the op's own shape, which is why every predicate takes (g, op, charId)
-// rather than just (op, charId). Callers (resolveTick, see tick.ts's
-// applyOpWithWants) run these ONLY when the op's own deltas actually
-// landed: a botched mediated execution never reaches here, so no predicate
-// needs to re-derive that itself. A predicate answers "would THIS op, if it
-// landed, satisfy charId's want" -- nothing here mutates or emits.
+// `holding`/`revenge`/`recognition`/`safety` all read an edge (interest or
+// grudge) off the graph, not just the op's own shape, which is why every
+// predicate takes (g, op, charId) rather than just (op, charId). Callers
+// (resolveTick, see tick.ts's applyOpWithWants) run these ONLY when the
+// op's own deltas actually landed: a botched mediated execution never
+// reaches here, so no predicate needs to re-derive that itself -- and the
+// `op` they receive carries the REALIZED, post-band fields (tick.ts
+// reconstructs it off the landed event's data, T7 review), not necessarily
+// what the throne originally decided: `coin`'s threshold reads what
+// actually arrived. A predicate answers "would THIS op, if it landed,
+// satisfy charId's want" -- nothing here mutates or emits.
 export type WantFulfillFn = (g: WorldGraph, op: Op, charId: string) => boolean;
 
 export const WANT_FULFILL: Record<WantKey, WantFulfillFn> = {
@@ -79,9 +83,15 @@ export const WANT_FULFILL: Record<WantKey, WantFulfillFn> = {
   },
   safety: (g, op, charId) => {
     if (op.kind === 'pardon') return op.charId === charId;
-    if (op.kind !== 'invest' || op.project !== 'walls') return false;
-    if (findEdge(g, 'interest', charId, op.placeId) === undefined) return false;
-    const defenseBp = getNode(g, op.placeId).props['defenseBp'];
-    return typeof defenseBp === 'number' && defenseBp >= 2000;
+    // The act of fortifying IS the reassurance: walls investment's own
+    // deltas never touch defenseBp -- that arrives ~INVEST_MATURITY_TICKS
+    // later via economyStep's maturity pass, a disjoint path this predicate
+    // never sees -- and validateOp's invest-uniqueness check (one
+    // `proj:walls:<place>` node per place, ever) permanently blocks the
+    // second walls investment a post-op defenseBp>=2000 gate would have
+    // required. A post-op defenseBp read is therefore unreachable by
+    // construction; fulfilling on the investment itself is the only
+    // condition that can ever fire.
+    return op.kind === 'invest' && op.project === 'walls' && findEdge(g, 'interest', charId, op.placeId) !== undefined;
   },
 };
