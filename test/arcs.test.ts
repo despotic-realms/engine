@@ -21,7 +21,7 @@ import { canonJson, hashValue } from '../src/canon.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
 import { fx } from '../src/fx.js';
 import { makeFortune } from '../src/fortune.js';
-import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode, setEdgeProp } from '../src/graph.js';
+import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode, propFx, setEdgeProp } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
 import type { CharacterArc } from '../src/arcs.js';
 import { applyMediatedOp } from '../src/mediate.js';
@@ -374,4 +374,91 @@ describe('character arcs wired into resolveTick', () => {
     const rejected = medEm.all().find((e) => e.type === 'op.rejected');
     expect(rejected).toBeDefined();
     expect(rejected?.data).toMatchObject({ reason: 'no hands' });
+  });
+
+  it('same-tick restless+scheme departure safety: both arcs terminate together, departureDeltas idempotent against already-departed character (T9 regression)', () => {
+    // T9 review safety property: when one character has both restless and scheme
+    // arcs terminating in the same advanceCharacterArcs call, it is safe because
+    // Pass 1 iterates sorted arc keys ('restless:char:x' < 'scheme:char:x'),
+    // so restless departure runs first and scheme's strike then calls
+    // departureDeltas against the already-updated graph, where the
+    // existence-guarded lookups (edgesFrom/findEdge) find nothing to remove --
+    // no removeEdge delta for a missing edge is ever built.
+    //
+    // Fixture: char:x has office:steward appointment, low-bp loyalty edge (3000),
+    // and both arcs seeded at stage 2 positioned to terminate on tick 9:
+    // - Restless stage 2, sinceTick 6: (9-6)=3 >= STAGE_ADVANCE_TICKS(3) ✓ DEPARTS
+    // - Scheme stage 2, sinceTick 7: (9-7)=2 >= SCHEME_STAGE_ADVANCE_TICKS(2) ✓ STRIKES
+    let g = withRestlessCandidate(3000); // low loyalty to allow both arcs to arm if needed
+    g = addNode(g, { id: 'office:steward', type: 'office', props: { title: 'Steward' } });
+    g = addEdge(g, { type: 'appointment', src: 'char:x', dst: 'office:steward', props: { since: 0 } });
+
+    let arcs: Record<string, CharacterArc> = {
+      'restless:char:x': { kind: 'restless', charId: 'char:x', stage: 2, sinceTick: 6 },
+      'scheme:char:x': { kind: 'scheme', charId: 'char:x', stage: 2, sinceTick: 7 },
+    };
+    const RIVAL = 'char:rival';
+    const PRE = g;
+
+    // Tick 9: both arcs advance to stage 3 (terminal) in a single call
+    const em = makeEmitter(9);
+    const out = advanceCharacterArcs(g, 9, arcs, em, RIVAL, 'place:ash');
+    g = out.g;
+    arcs = out.arcs;
+
+    // (1) Both events emitted, exactly once each
+    const events = em.all();
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => e.type).sort()).toEqual(['arc.departed', 'arc.scheme.struck']);
+
+    // (2) Restless departure event (from Pass 1, runs first)
+    const departedEvent = events.find((e) => e.type === 'arc.departed');
+    expect(departedEvent).toBeDefined();
+    expect(departedEvent?.data).toEqual({ charId: 'char:x', toId: RIVAL });
+
+    // (3) Scheme strike event (from Pass 1, runs second, after restless already departed)
+    const struckEvent = events.find((e) => e.type === 'arc.scheme.struck');
+    expect(struckEvent).toBeDefined();
+    expect(struckEvent?.data).toEqual({ charId: 'char:x' });
+
+    // (4) Character ended departed exactly once:
+    // - loyalty edge gone
+    expect(findEdge(g, 'loyalty', 'char:x', 'char:ruler')).toBeUndefined();
+    // - appointment vacated (restless departure did this first; scheme strike's
+    //   second departureDeltas call found no edges to remove and emitted no
+    //   edge.remove deltas for them, proving idempotency)
+    expect(findEdge(g, 'appointment', 'char:x', 'office:steward')).toBeUndefined();
+    // - inRivalCourt flag set (only once, by restless)
+    expect(getNode(g, 'char:x').props['inRivalCourt']).toBe(true);
+    // - both arc flags cleared
+    expect(getNode(g, 'char:x').props['arc:restless']).toBe(false);
+    expect(getNode(g, 'char:x').props['arc:scheme']).toBe(false);
+    expect(getNode(g, 'char:x').props['schemeSinceTick']).toBe(-1); // SCHEME_UNSET
+    // - character node survives (spec §12)
+    expect(g.nodes['char:x']).toBeDefined();
+    // - office node survives
+    expect(g.nodes['office:steward']).toBeDefined();
+
+    // (5) Scheme strike's own deltas (legitimacy/unrest damage) were applied
+    const legit = propFx(getNode(g, 'inst:crown').props, 'legitimacy');
+    const unrest = propFx(getNode(g, 'place:ash').props, 'unrest');
+    expect(legit).toBe(fx('42')); // 50 - 8 (STRIKE_LEGITIMACY_COST)
+    expect(unrest).toBe(fx('20')); // 10 + 10 (STRIKE_UNREST_DELTA)
+
+    // (6) Full delta-replay: applying every emitted event's deltas in order to
+    // the pre-call graph reproduces the post-call graph by hashValue
+    expect(hashValue(applyDeltas(PRE, events.flatMap((e) => e.deltas)))).toBe(hashValue(g));
+
+    // (7) Both arcs removed from state
+    expect(arcs['restless:char:x']).toBeUndefined();
+    expect(arcs['scheme:char:x']).toBeUndefined();
+
+    // (8) Next advanceCharacterArcs call (tick 10) emits no spurious arc.scheme.marked/unmarked
+    // for the departed character (already ineligible by virtue of inRivalCourt &&
+    // the removed loyalty edge defaulting to neutral 5000, which is >= 3500 ceiling)
+    const em2 = makeEmitter(10);
+    const out2 = advanceCharacterArcs(g, 10, arcs, em2, RIVAL, 'place:ash');
+    const nextEvents = em2.all();
+    // Should be silent for char:x (ineligible, never marked again)
+    expect(nextEvents).toHaveLength(0);
   });
