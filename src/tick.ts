@@ -5,6 +5,8 @@
 // reasoning travels SDK → host → sealed store → analyst, never through the
 // world (D16). Free-text directives arrive here already compiled to ops.
 import { hashValue } from './canon.js';
+import type { CharacterArc } from './arcs.js';
+import { advanceCharacterArcs } from './arcs.js';
 import type { ChronicleEvent, Emitter, GraphDelta } from './events.js';
 import { applyDeltas, makeEmitter } from './events.js';
 import type { Fortune } from './fortune.js';
@@ -42,6 +44,12 @@ export interface SeasonConfig {
   throne: Seat;
   reporters: Seat[];
   primaryPlaceId: string;
+  /** T8 (spec §5): the poacher -- a character node id (the slice sets
+   *  'char:usurper'). No rival configured means poach bids never fire;
+   *  restless arming, stage advance, retention, and departure all still
+   *  run regardless -- only the informational arc.poach.bid event and
+   *  arc.departed's `toId` (null instead) are affected. */
+  rivalId?: string;
 }
 
 /** Deterministic content hash of the season's world-side bundle (host adds model pins per D15). */
@@ -65,6 +73,7 @@ export interface ReignState {
   firedOnce: Record<string, true>;
   presented: Record<string, number>;   // instanceKey -> times presented as a brief (D13 novelty casting)
   pending: PendingBrief[];
+  arcs: Record<string, CharacterArc>;  // T8 (spec §5): key = `${kind}:${charId}` -- restless/scheme arc bookkeeping (stage, sinceTick)
 }
 
 export interface DecisionChoice {
@@ -98,7 +107,7 @@ export interface TickPacket {
 }
 
 export function initialState(season: SeasonConfig): ReignState {
-  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [] };
+  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {} };
 }
 
 const CHOICE_KEYS = new Set(['briefId', 'optionId', 'ops', 'via', 'compileRef']);
@@ -271,6 +280,7 @@ export function resolveTick(
   const tick = state.tick;
   const em = makeEmitter(tick);
   let g = state.graph;
+  let arcs = state.arcs;
   const tierCfg = season.tiers[state.tier];
   if (!tierCfg) throw new Error(`no tier config for tier ${state.tier}`);
 
@@ -364,6 +374,18 @@ export function resolveTick(
   g = economyStep(g, tick, fortune, em);
   g = socialStep(g, tick, em);
   g = advanceArcs(g, tick, season.calendar, em);
+  // T8 (spec §5): character arcs generalize the famine machinery just
+  // above to people -- same tick-driven systems step, same delta-native
+  // discipline, placed immediately after advanceArcs so the parallel is
+  // visible at the call site. Ordering vs. advanceArcs is a no-op choice,
+  // not a dependency: famine arms/advances read only place nodes off the
+  // calendar, character arcs read only character nodes off the graph (plus
+  // wantSinceTick) -- the two passes are disjoint over the graph, so which
+  // runs first can't change either one's outcome, only which of their
+  // events would sort first within this tick's chronicle.
+  const arcResult = advanceCharacterArcs(g, tick, arcs, em, season.rivalId);
+  g = arcResult.g;
+  arcs = arcResult.arcs;
 
   // 8. Ladder.
   let tier = state.tier;
@@ -419,7 +441,7 @@ export function resolveTick(
   });
 
   return {
-    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending },
+    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs },
     events: em.all(),
     packet: { tick: nextTick, tier, attentionSlots: nextCfg.attentionSlots, briefs, reports, correspondence },
   };
