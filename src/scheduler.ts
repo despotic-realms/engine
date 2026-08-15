@@ -47,6 +47,18 @@ export interface SchedulerContext {
    *  within each, newly first, so a brief that just became possible outranks
    *  one that has sat eligible without being shown. */
   newlyEligible: Set<string>;
+  /** Causality §1 (T2): computed attribution -- instanceKey -> sorted
+   *  attributing player event ids, for instance keys drawn from
+   *  `newlyEligible` (attribution.ts's attribute() is only ever asked about
+   *  newly-eligible entries; a standing instanceKey is never a key here).
+   *  Membership alone (not the array's contents) is what select() below
+   *  uses to further split `newly` into [attributed, world-newly] -- the
+   *  event ids themselves are tick.ts's business (attaching Brief.becauseOf
+   *  to the briefs it constructs from sel.chosen). Kept as a pre-computed
+   *  Map rather than re-derived here so scheduler.ts stays free of event/
+   *  ancestry logic, per the causality plan's file structure (attribution.ts
+   *  owns the model). */
+  becauseOf: Map<string, string[]>;
 }
 
 export interface SchedulerSelection {
@@ -66,19 +78,22 @@ export interface SchedulerPolicy {
 // like any other unseen content. Ties within a stratum keep the seeded
 // lottery; an all-tied pool (the common case early in a reign, or any
 // single-partition call) is exactly the old unstratified draw. Extracted for
-// causality §1 (recency casting) so it can run once per [newly, standing]
-// partition -- but fortune.pick('casting', tick, 'slot', stratum, slot) is a
-// pure hash of (tick, 'slot', slot), only reduced onto `stratum` afterward
-// by modulo, so two calls that both start counting slots at 0 in the same
-// tick collide: the newly partition's k-th draw and the standing
-// partition's k-th draw hash the identical key. `startSlot` fixes this --
-// the caller threads the counter across both calls (standing picks up where
-// newly left off), so every draw in a tick gets a unique slot regardless of
-// which partition it lands in. A pool called as the ONLY partition (the
-// other left empty, startSlot 0) is still byte-for-byte the pre-T1 loop:
-// same slot indices from 0, same stratify-then-pick shape, same fortune
-// draws -- an empty partition consumes zero slots (the loop body never
-// runs), so the surviving partition draws 0,1,2,... exactly as before.
+// causality §1 (recency casting) so it can run once per partition of the
+// non-probe pool -- T1 introduced two ([newly, standing]), T2 splits
+// `newly` further into [attributed, world-newly] (three total) -- but
+// fortune.pick('casting', tick, 'slot', stratum, slot) is a pure hash of
+// (tick, 'slot', slot), only reduced onto `stratum` afterward by modulo, so
+// two calls that both start counting slots at 0 in the same tick collide:
+// one partition's k-th draw and another's k-th draw would hash the
+// identical key. `startSlot` fixes this -- each caller threads the counter
+// from the previous call's `nextSlot` (attributed -> world-newly ->
+// standing), so every draw in a tick gets a unique slot regardless of which
+// partition it lands in. A pool called as the ONLY non-empty partition
+// (every other one left empty, startSlot 0) is still byte-for-byte the
+// pre-T1 loop: same slot indices from 0, same stratify-then-pick shape,
+// same fortune draws -- an empty partition consumes zero slots (the loop
+// body never runs), so the surviving partition draws 0,1,2,... exactly as
+// before, no matter how many empty partitions it's threaded past.
 function castByNovelty(
   pool: readonly EligibleEntry[],
   budget: number,
@@ -107,7 +122,7 @@ function castByNovelty(
 
 export const examiner: SchedulerPolicy = {
   name: 'examiner',
-  select({ tick, briefBudget, eligible, fortune, calendar, presented, newlyEligible }) {
+  select({ tick, briefBudget, eligible, fortune, calendar, presented, newlyEligible, becauseOf }) {
     const letters = eligible.filter((e) => e.storylet.kind === 'letter');
     const pool = eligible.filter((e) => e.storylet.kind === 'brief');
     const chosen: EligibleEntry[] = [];
@@ -121,22 +136,32 @@ export const examiner: SchedulerPolicy = {
       if (hit && chosen.length < briefBudget) chosen.push(hit);
       else skippedProbes.push(entry.storyletId); // absent from the pool, or budget already spent -- either way, unobserved
     }
-    // Causality §1: recency casting. Partition what's left into [newly,
-    // standing] and run D13's novelty lottery within each, newly first --
-    // briefs that just became possible outrank ones that have been sitting
-    // eligible, at equal presented counts. A tick where every eligible brief
-    // is newly-eligible (tick 1: ReignState.eligibleLastTick starts empty,
-    // so the diff is the whole pool) leaves `standing` empty and collapses
-    // to the single castByNovelty call pre-T1 select() always made. The
-    // slot counter is threaded from newly into standing (not restarted at
-    // 0) so the two partitions' draws never hash the same fortune key --
-    // see castByNovelty's comment.
+    // Causality §1: recency + attribution casting. Partition what's left
+    // into [newly, standing] (T1), then split `newly` further into
+    // [attributed, world-newly] (T2, via `becauseOf` membership) and run
+    // D13's novelty lottery within each of the three, attributed first --
+    // a brief the PLAYER's own writes just made possible outranks one the
+    // world made possible, which outranks one that's been sitting eligible.
+    // A tick with no attribution at all (becauseOf empty -- e.g. a reign's
+    // opening moves, or a tick with no decisions) leaves `attributedNewly`
+    // empty and collapses to T1's exact two-partition behavior; a tick
+    // where every eligible brief is ALSO newly-eligible with nothing
+    // world-newly (tick 1: ReignState.eligibleLastTick starts empty)
+    // further collapses toward the single castByNovelty call pre-T1
+    // select() always made. The slot counter threads across all three
+    // calls in casting order (attributed -> world-newly -> standing) so no
+    // two partitions' draws ever hash the same fortune key -- see
+    // castByNovelty's comment.
     const remaining = pool.filter((e) => !chosen.includes(e));
     const newly = remaining.filter((e) => newlyEligible.has(e.instanceKey));
     const standing = remaining.filter((e) => !newlyEligible.has(e.instanceKey));
-    const newlyCast = castByNovelty(newly, briefBudget - chosen.length, presented, fortune, tick, 0);
-    chosen.push(...newlyCast.chosen);
-    const standingCast = castByNovelty(standing, briefBudget - chosen.length, presented, fortune, tick, newlyCast.nextSlot);
+    const attributedNewly = newly.filter((e) => becauseOf.has(e.instanceKey));
+    const worldNewly = newly.filter((e) => !becauseOf.has(e.instanceKey));
+    const attributedCast = castByNovelty(attributedNewly, briefBudget - chosen.length, presented, fortune, tick, 0);
+    chosen.push(...attributedCast.chosen);
+    const worldCast = castByNovelty(worldNewly, briefBudget - chosen.length, presented, fortune, tick, attributedCast.nextSlot);
+    chosen.push(...worldCast.chosen);
+    const standingCast = castByNovelty(standing, briefBudget - chosen.length, presented, fortune, tick, worldCast.nextSlot);
     chosen.push(...standingCast.chosen);
     return { chosen, letters, skippedProbes };
   },

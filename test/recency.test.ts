@@ -81,6 +81,12 @@ function seasonWith(storylets: Storylet[], briefBudget: number): SeasonConfig {
 
 const f = makeFortune('recency-test-seed');
 const empty = { seatId: 'seat:throne', choices: [] };
+// Causality §1 (T2, attribution): this file is about the [newly, standing]
+// partition itself, not attribution -- an empty map means becauseOf.has(...)
+// is always false, so every newly-eligible entry here falls into
+// scheduler.ts's world-newly sub-partition, reproducing this file's
+// pre-T2 [newly, standing] behavior exactly (see scheduler.ts's comment).
+const noBecauseOf: Map<string, string[]> = new Map();
 
 describe('examiner.select: recency partition (causality §1)', () => {
   it('a newly-eligible instance is dealt before a standing instance at equal presented counts; a tied newly/newly pair still resolves by the seeded lottery', () => {
@@ -95,7 +101,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // the wrong reason.
     const sel = examiner.select({
       tick: 0, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['newly']),
+      newlyEligible: new Set(['newly']), becauseOf: noBecauseOf,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['newly']);
 
@@ -105,7 +111,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // decides, exactly as it would pre-T1.
     const bothNewly = examiner.select({
       tick: 0, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['standing', 'newly']),
+      newlyEligible: new Set(['standing', 'newly']), becauseOf: noBecauseOf,
     });
     const expectedPick = f.pick('casting', 0, 'slot', pool, 0);
     expect(bothNewly.chosen).toEqual([expectedPick]);
@@ -116,7 +122,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     const presented = { 'newly-shown-twice': 2, 'newly-fresh': 0 };
     const sel = examiner.select({
       tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['newly-shown-twice', 'newly-fresh']),
+      newlyEligible: new Set(['newly-shown-twice', 'newly-fresh']), becauseOf: noBecauseOf,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['newly-fresh']);
   });
@@ -163,7 +169,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // cannot pass "by accident" the way a same-relative-index coincidence
     // could for an equal-outcome tick).
     const sel = examiner.select({
-      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible,
+      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf,
     });
 
     // Reference: the threaded-slot draw, computed independently by hand,
@@ -192,7 +198,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
 
     // Determinism: same inputs, same cast, every time.
     const again = examiner.select({
-      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible,
+      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf,
     });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });

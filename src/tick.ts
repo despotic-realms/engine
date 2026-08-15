@@ -7,6 +7,7 @@
 import { hashValue } from './canon.js';
 import type { CharacterArc } from './arcs.js';
 import { advanceCharacterArcs } from './arcs.js';
+import { attribute } from './attribution.js';
 import type { ChronicleEvent, Emitter, GraphDelta } from './events.js';
 import { applyDeltas, makeEmitter } from './events.js';
 import type { Fortune } from './fortune.js';
@@ -102,6 +103,13 @@ export interface Brief {
   body: string;
   options: Array<{ id: string; label: string }>;
   directiveAllowed: true;
+  /** Causality §1 (T2): sorted ids of THIS tick's player-descended events
+   *  whose writes made this brief newly eligible -- present only on
+   *  player-attributed deals (attribution.ts's attribute()), absent (never
+   *  `undefined`-but-present -- see the construction site) on every other
+   *  brief. Packet-only, informational: surfaces render a "because of your
+   *  order" label off it; nothing in the core reads it back. */
+  becauseOf?: string[];
 }
 
 export interface Letter { from: string; title: string; body: string; storyletId: string }
@@ -433,9 +441,20 @@ export function resolveTick(
   const eligibleBriefKeys = eligible.filter((e) => e.storylet.kind === 'brief').map((e) => e.instanceKey);
   const newlyEligible = new Set(eligibleBriefKeys.filter((k) => !priorEligible.has(k)));
   const eligibleLastTick = [...new Set(eligibleBriefKeys)].sort();
+  // Causality §1 (T2): computed attribution over the newly-eligible brief
+  // entries only (attribute() is never asked about standing ones -- a
+  // standing instanceKey can never be a becauseOf map key). `em.all()` here
+  // is everything chronicled THIS tick through step 8 (decisions, ops,
+  // observations, systems, ladder) -- nothing from step 9 itself has been
+  // emitted yet, so this can't self-referentially attribute a brief to its
+  // own presentation. `decisionEvents.values()` is every decision.recorded
+  // id minted THIS tick (step 1-2, one per submitted choice, attended or
+  // not) -- the ancestry walk's root set.
+  const newlyEligibleEntries = eligible.filter((e) => e.storylet.kind === 'brief' && newlyEligible.has(e.instanceKey));
+  const becauseOf = attribute(g, newlyEligibleEntries, em.all(), new Set(decisionEvents.values()));
   // presented (pre-increment below) is the N-1 snapshot: this tick's own
   // presentations don't count toward its own selection.
-  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible });
+  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible, becauseOf });
   for (const id of sel.skippedProbes) em.emit('probe.skipped', { data: { storyletId: id, tick: nextTick } });
 
   const pending: PendingBrief[] = [];
@@ -447,12 +466,18 @@ export function resolveTick(
     presented[entry.instanceKey] = (presented[entry.instanceKey] ?? 0) + 1;
     if (entry.storylet.once) firedOnce[entry.instanceKey] = true;
     pending.push({ briefId, storyletId: entry.storylet.id, binding: entry.binding, defaultOptionId: entry.storylet.defaultOptionId, presentedEventId: ev.id });
+    // becauseOf is spread in conditionally (never a present-but-undefined
+    // key): canonJson (canon.ts) throws on `typeof undefined`, and a Brief
+    // can end up inside a hashed/canonicalized value down the line -- an
+    // absent key is also just the correct reading of the optional field.
+    const becauseOfIds = becauseOf.get(entry.instanceKey);
     briefs.push({
       briefId, storyletId: entry.storylet.id,
       title: renderTpl(entry.storylet.title, g, entry.binding),
       body: renderTpl(entry.storylet.body, g, entry.binding),
       options: entry.storylet.options.map((o) => ({ id: o.id, label: renderTpl(o.label, g, entry.binding) })),
       directiveAllowed: true,
+      ...(becauseOfIds !== undefined ? { becauseOf: becauseOfIds } : {}),
     });
   });
 
