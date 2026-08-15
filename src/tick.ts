@@ -74,6 +74,15 @@ export interface ReignState {
   presented: Record<string, number>;   // instanceKey -> times presented as a brief (D13 novelty casting)
   pending: PendingBrief[];
   arcs: Record<string, CharacterArc>;  // T8 (spec §5): key = `${kind}:${charId}` -- restless/scheme arc bookkeeping (stage, sinceTick)
+  /** Causality §1: sorted instance keys of THIS state's tick's eligible
+   *  BRIEF set (letters excluded -- matches what examiner.select's pool
+   *  sees). Threads through resolveTick like arcs/presented/cooldowns: each
+   *  call reads it as the prior snapshot to diff against the freshly
+   *  computed eligible set (the difference is `newlyEligible`), then
+   *  overwrites it with that fresh set for the next call to read. Empty at
+   *  the start of a reign, so tick 1 finds every eligible brief newly
+   *  eligible. */
+  eligibleLastTick: string[];
 }
 
 export interface DecisionChoice {
@@ -107,7 +116,7 @@ export interface TickPacket {
 }
 
 export function initialState(season: SeasonConfig): ReignState {
-  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {} };
+  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {}, eligibleLastTick: [] };
 }
 
 const CHOICE_KEYS = new Set(['briefId', 'optionId', 'ops', 'via', 'compileRef']);
@@ -415,9 +424,18 @@ export function resolveTick(
   const firedOnce = { ...state.firedOnce };
   const presented = { ...state.presented };
   const eligible = eligibleStorylets(g, decks, cooldowns, nextTick, firedOnce);
+  // Causality §1: recency casting. Compare this tick's eligible BRIEF keys
+  // (letters excluded -- matches select's own pool) against the prior
+  // snapshot threaded in via ReignState.eligibleLastTick to find what just
+  // became possible, then overwrite the snapshot with this tick's set for
+  // the next call to read.
+  const priorEligible = new Set(state.eligibleLastTick);
+  const eligibleBriefKeys = eligible.filter((e) => e.storylet.kind === 'brief').map((e) => e.instanceKey);
+  const newlyEligible = new Set(eligibleBriefKeys.filter((k) => !priorEligible.has(k)));
+  const eligibleLastTick = [...new Set(eligibleBriefKeys)].sort();
   // presented (pre-increment below) is the N-1 snapshot: this tick's own
   // presentations don't count toward its own selection.
-  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented });
+  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible });
   for (const id of sel.skippedProbes) em.emit('probe.skipped', { data: { storyletId: id, tick: nextTick } });
 
   const pending: PendingBrief[] = [];
@@ -456,7 +474,7 @@ export function resolveTick(
   });
 
   return {
-    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs },
+    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs, eligibleLastTick },
     events: em.all(),
     packet: { tick: nextTick, tier, attentionSlots: nextCfg.attentionSlots, briefs, reports, correspondence },
   };
