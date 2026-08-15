@@ -29,7 +29,7 @@ import { advanceArcs, examiner } from './scheduler.js';
 import type { Band, WantKey } from './spine.js';
 import { WANT_FULFILL, currentWant } from './spine.js';
 import type { Deck, Storylet, StoryletOption } from './storylet.js';
-import { bindOps, eligibleStorylets, renderTpl } from './storylet.js';
+import { bindOps, eligibleStorylets, possibleStorylets, renderTpl } from './storylet.js';
 import { economyStep, fingerprintDecayStep, socialStep } from './systems.js';
 
 export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number; mediation?: MediationConfig }
@@ -75,14 +75,21 @@ export interface ReignState {
   presented: Record<string, number>;   // instanceKey -> times presented as a brief (D13 novelty casting)
   pending: PendingBrief[];
   arcs: Record<string, CharacterArc>;  // T8 (spec §5): key = `${kind}:${charId}` -- restless/scheme arc bookkeeping (stage, sinceTick)
-  /** Causality §1: sorted instance keys of THIS state's tick's eligible
-   *  BRIEF set (letters excluded -- matches what examiner.select's pool
-   *  sees). Threads through resolveTick like arcs/presented/cooldowns: each
-   *  call reads it as the prior snapshot to diff against the freshly
-   *  computed eligible set (the difference is `newlyEligible`), then
-   *  overwrites it with that fresh set for the next call to read. Empty at
-   *  the start of a reign, so tick 1 finds every eligible brief newly
-   *  eligible. */
+  /** Causality §1 (whole-wave final-review fix): sorted instance keys of
+   *  THIS state's tick's PATTERN-POSSIBILITY BRIEF set (letters excluded)
+   *  -- storylet.ts's possibleStorylets(), NOT eligibleStorylets': every
+   *  brief instance whose pattern binds against the graph this tick,
+   *  UNFILTERED by cooldowns or firedOnce. Deliberately NOT "what
+   *  examiner.select's pool sees" (that pool is the cooldown/firedOnce-
+   *  filtered DEALT set, a strict subset) -- a brief instance mid-cooldown
+   *  still counts as possible here, so its cooldown expiring later never
+   *  reads as "newly eligible" (its pattern never stopped binding, it was
+   *  simply undealable for a tick or two). Threads through resolveTick
+   *  like arcs/presented/cooldowns: each call reads it as the prior
+   *  snapshot to diff against the freshly computed possibility set (the
+   *  difference is `newlyEligible`), then overwrites it with that fresh
+   *  set for the next call to read. Empty at the start of a reign, so tick
+   *  1 finds every possible brief newly eligible. */
   eligibleLastTick: string[];
   /** Causality §3 (T4): booked follow-ups -- StoryletOption.books applied at
    *  choice-application time (attended, defaulted, and neglected paths all
@@ -487,15 +494,27 @@ export function resolveTick(
   const firedOnce = { ...state.firedOnce };
   const presented = { ...state.presented };
   const eligible = eligibleStorylets(g, decks, cooldowns, nextTick, firedOnce);
-  // Causality §1: recency casting. Compare this tick's eligible BRIEF keys
-  // (letters excluded -- matches select's own pool) against the prior
-  // snapshot threaded in via ReignState.eligibleLastTick to find what just
-  // became possible, then overwrite the snapshot with this tick's set for
-  // the next call to read.
-  const priorEligible = new Set(state.eligibleLastTick);
-  const eligibleBriefKeys = eligible.filter((e) => e.storylet.kind === 'brief').map((e) => e.instanceKey);
-  const newlyEligible = new Set(eligibleBriefKeys.filter((k) => !priorEligible.has(k)));
-  const eligibleLastTick = [...new Set(eligibleBriefKeys)].sort();
+  // Causality §1 (whole-wave final-review fix): recency casting keys off
+  // the PATTERN-POSSIBILITY set (possibleStorylets, storylet.ts) instead
+  // of the cooldown/firedOnce-FILTERED `eligible` pool just above --
+  // `eligible` itself is untouched by this fix and remains exactly the
+  // DEALT pool examiner.select draws from below. Why the split: a brief
+  // dealt at tick T with cooldownTicks C leaves `eligible` until T+C, then
+  // re-enters it -- but its PATTERN never stopped binding in between, so
+  // diffing against the filtered pool (the pre-fix behavior) misread every
+  // cooldown expiry as "just became possible," handing the recycling brief
+  // a recency boost over standing briefs regardless of how many times it
+  // had already been shown. Diffing against the unfiltered possibility set
+  // fixes this: a cooldown-expired brief was already possible last tick
+  // (present in the snapshot below), so it re-enters `eligible` as
+  // STANDING, competing on presented-count novelty like everything else --
+  // while a genuine world-change unlock (a pattern that could NOT bind
+  // last tick, cooldown aside) still lands newly, exactly as before.
+  const possible = possibleStorylets(g, decks);
+  const priorPossible = new Set(state.eligibleLastTick);
+  const possibleBriefKeys = possible.filter((e) => e.storylet.kind === 'brief').map((e) => e.instanceKey);
+  const newlyEligible = new Set(possibleBriefKeys.filter((k) => !priorPossible.has(k)));
+  const eligibleLastTick = [...new Set(possibleBriefKeys)].sort();
   // Causality §1 (T2): computed attribution over the newly-eligible brief
   // entries only (attribute() is never asked about standing ones -- a
   // standing instanceKey can never be a becauseOf map key). `em.all()` here

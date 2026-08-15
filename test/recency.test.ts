@@ -275,3 +275,106 @@ describe('ReignState.eligibleLastTick (causality §1)', () => {
     expect(out1.packet.briefs.map((b) => b.storyletId)).toEqual(out2.packet.briefs.map((b) => b.storyletId));
   });
 });
+
+// Whole-wave final-review fix (CRITICAL): eligibleLastTick/newlyEligible must
+// diff the PATTERN-POSSIBILITY set, not the cooldown/firedOnce-FILTERED
+// dealt pool. Pre-fix, tick.ts computed the diff off `eligible`
+// (eligibleStorylets' filtered result) -- a brief dealt at tick T with
+// cooldownTicks C leaves THAT filtered set until T+C, then re-enters it, and
+// re-entering after an absence read as "just became possible" even though
+// the brief's own PATTERN never stopped binding the whole time. A brief
+// misclassified newly jumps straight to the front of the casting order
+// (scheduler.ts casts newly before standing), bypassing D13 presented-count
+// novelty entirely -- so a short-cooldown brief could re-win the recency
+// stratum every single time its cooldown expired, monopolizing the budget
+// against briefs that have never been shown at all. Fixed by diffing against
+// storylet.ts's possibleStorylets() instead (unfiltered by cooldowns/
+// firedOnce) -- see tick.ts step 9's own comment for the mechanism.
+describe('possibility-set recency (final-review fix): cooldown re-entry is standing, not newly', () => {
+  function mkAlwaysCooldown(id: string, cooldownTicks: number): Storylet {
+    return {
+      id, kind: 'brief', tier: 1, cooldownTicks, once: false,
+      pattern: { nodes: [{ as: 'p', type: 'place' }] },
+      title: id, body: id,
+      options: [{ id: 'ack', label: 'Acknowledge', ops: [] }, { id: 'skip', label: 'Skip', ops: [] }],
+      defaultOptionId: 'skip',
+    };
+  }
+
+  it("the reviewer's probe: budget 1, one cooldown-2 brief + two never-shown cooldown-0 briefs -- the recycler does not monopolize by exploiting cooldown-churn-as-newly", () => {
+    // Unfiltered-possibility semantics: 'recycler's pattern (unconditional
+    // 'any place') binds every tick from tick 1 onward, so it is newly
+    // ONLY at tick 1 (tied with never-a/never-b, prior possibility set
+    // empty) -- every later cooldown expiry re-enters the DEALT pool as
+    // STANDING, competing on presented-count novelty like the other two,
+    // never jumping the queue again. Pre-fix (diffing the FILTERED pool),
+    // 'recycler' drops out of `eligible` for exactly the 1 tick its
+    // cooldown blocks it, then reappears "newly" -- so it deals every
+    // OTHER tick regardless of its own presented count, starving whichever
+    // of never-a/never-b hasn't been drawn yet.
+    const season = seasonWith(
+      [mkAlwaysCooldown('recycler', 2), mkAlwaysCooldown('never-a', 0), mkAlwaysCooldown('never-b', 0)],
+      1,
+    );
+    // Seed chosen (not arbitrary) so the RED failure is unambiguous: run
+    // against unfixed ec7372b, this exact fixture deals
+    // never-a, recycler, never-b, recycler, never-b, recycler, never-a, recycler
+    // over 8 ticks -- presented = { recycler: 4, 'never-a': 2, 'never-b': 2
+    // }, the recycler dealing on every single even tick from tick 2 on,
+    // exactly the "4 by tick 8 vs 2 each" pattern the whole-wave review
+    // flagged. Captured empirically (scratch probe against the unfixed
+    // dist build), not hand-derived.
+    const f3 = makeFortune('cooldown-churn-probe-seed');
+    let state = initialState(season);
+    const dealt: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const out = resolveTick(season, state, empty, f3);
+      state = out.state;
+      dealt.push(...out.packet.briefs.map((b) => b.storyletId));
+    }
+
+    // Fixed behavior, captured empirically the same way (post-fix run of
+    // this exact fixture/seed): no stratum-jumping means the three settle
+    // into a tied rotation instead of the recycler racing ahead.
+    expect(dealt).toEqual([
+      'never-a', 'recycler', 'never-b', 'never-a', 'recycler', 'never-b', 'never-a', 'recycler',
+    ]);
+    expect(state.presented).toEqual({ recycler: 3, 'never-a': 3, 'never-b': 2 });
+
+    // The general, seed-independent invariant this fixture is built to
+    // prove (per the review's own framing): once the recycler's presented
+    // count is caught up to (or ahead of) a never-shown brief's, the
+    // never-shown brief -- tied into the SAME standing stratum, per D13
+    // least-presented-first -- must not fall more than 1 presentation
+    // behind. A pre-fix run breaks this immediately: recycler reaches 2
+    // presentations (tick 4) while one of never-a/never-b is still at 0.
+    expect(state.presented['recycler']! - state.presented['never-a']!).toBeLessThanOrEqual(1);
+    expect(state.presented['recycler']! - state.presented['never-b']!).toBeLessThanOrEqual(1);
+  });
+
+  it('a cooldown-expired brief re-enters the dealt pool as STANDING: eligibleLastTick carries it across the cooldown gap unbroken', () => {
+    // Single-brief, single-tick-level check of the same mechanism above,
+    // isolating just the eligibleLastTick bookkeeping (no lottery/budget
+    // contention): a lone cooldown-2 brief's instanceKey must remain in
+    // the possibility snapshot on the very tick its cooldown excludes it
+    // from the dealt pool, so it's already "known possible" the moment it
+    // re-enters and therefore never flagged newly again.
+    const season = seasonWith([mkAlwaysCooldown('solo', 2)], 1);
+    const f4 = makeFortune('possibility-carries-through-cooldown-seed');
+    let state = initialState(season);
+    const snapshots: string[][] = [];
+    for (let i = 0; i < 4; i++) {
+      const out = resolveTick(season, state, empty, f4);
+      state = out.state;
+      snapshots.push(out.state.eligibleLastTick);
+    }
+    // Tick 1: presented (dealt), and possible -- in the snapshot.
+    // Tick 2: cooldown excludes it from `eligible` (the DEALT pool), but
+    // its pattern (unconditional) still binds -- possible, still in the
+    // snapshot, unbroken.
+    // Tick 3: cooldown clears, back in `eligible` -- and per the fix,
+    // NOT newly (it was already in the tick-2 snapshot), so this deals it
+    // as standing, not a recency win.
+    for (const snap of snapshots) expect(snap).toEqual(['solo']);
+  });
+});

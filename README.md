@@ -128,8 +128,9 @@ preserve the asymmetry between hidden and visible, between local knowledge
 
 The world answers the player. Four mechanisms make a reign's briefs
 responsive to what the throne actually does, layered on top of the
-novelty-weighted lottery the scheduler already runs within every stratum
-below.
+novelty-weighted lottery the scheduler already runs within each
+eligible-brief stratum below — probes and due bookings force-deal instead,
+drawing nothing.
 
 **Recency casting** — the scheduler remembers which brief instances were
 eligible as of the previous tick (`ReignState.eligibleLastTick`) and diffs

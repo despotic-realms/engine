@@ -263,6 +263,137 @@ describe('attribute: causality §1 test scenarios', () => {
     expect(result2.get('granary-brief')).toEqual(expected);
     expect([...result1.entries()]).toEqual([...result2.entries()]);
   });
+
+  // Whole-wave final-review fix (IMPORTANT): the literal-pin gate must
+  // scope to edge-channel hits only. Pre-fix, matchesRead computed one
+  // shared "baseHit" (pair OR edgeType) and then, whenever the pattern
+  // pinned ANY literal at all, required THAT SAME delta to carry it --
+  // including for a node.set/pair hit, even though literals can only ever
+  // originate from a '#'-pinned EDGE ENDPOINT (match.ts: node patterns
+  // have no pinning mechanism of their own) and a node.set delta's `ids`
+  // can only ever be the ONE node it wrote. Gating the pair channel on a
+  // literal it structurally could never carry was a category error: any
+  // reaction storylet shaped "unpinned char var, read a char prop; scoped
+  // by a pinned edge for CONTEXT only" became unattributable through its
+  // node-prop channel no matter what happened, so structurally identical
+  // reactions to different flavors of the same deed got inconsistent
+  // labels purely based on whether that flavor happened to also move a
+  // relationship edge. See this file's header, "Refinement rule", for the
+  // rule these tests pin.
+  describe('(g) literal-pin refinement is scoped to the edge channel, not the pair channel (final-review fix)', () => {
+    // Mirrors the reviewer's probe exactly: an unpinned char var ('c') with
+    // its own where-clause (reads `recent:envoy-firm`, a real deed
+    // fingerprint prop -- causality §2/T3), scoped by a pinned `loyalty ->
+    // #char:ruler` edge that exists ONLY for context (the same "edge for
+    // context, no where-clause of its own" idiom starter.audit-whisper
+    // already ships). reads.pairs = {'character|recent:envoy-firm'} (from
+    // c's where-clause -- NOT empty, unlike scenario (c)'s pattern), so
+    // this is exactly the shape where the pre-fix global gate and the
+    // post-fix scoped gate diverge.
+    const reactionPattern: GraphPattern = {
+      nodes: [{ as: 'c', type: 'character', where: [{ prop: 'recent:envoy-firm', cmp: 'ne', value: '' }] }],
+      edges: [{ type: 'loyalty', from: 'c', to: '#char:ruler' }],
+    };
+    function mkFirmReactionEntry(): EligibleEntry {
+      const storylet: Storylet = {
+        id: 'firm-reaction', kind: 'brief', tier: 1, cooldownTicks: 0, once: false,
+        pattern: reactionPattern, title: 't', body: 'b',
+        options: [{ id: 'a', label: 'a', ops: [] }, { id: 'b', label: 'b', ops: [] }],
+        defaultOptionId: 'a',
+      };
+      return { storylet, binding: { c: 'char:osric' }, instanceKey: 'firm-reaction' };
+    }
+
+    it("firm envoys attribute via the node.set/pair channel alone (RED against unfixed ec7372b -- 'firm' moves no relationship edge, so its deltas can never carry char:ruler's id no matter what)", () => {
+      const g = thornfieldGraph();
+      const em = makeEmitter(5);
+      const decision = em.emit('decision.recorded', { data: {} });
+      const g2 = applyOp(g, { kind: 'send_envoy', charId: 'char:osric', tone: 'firm' }, 5, em, 'seat:throne', [decision.id]);
+      const opEvent = em.all().find((e) => e.type === 'op.send_envoy')!;
+      // sanity: 'firm' really is node.set-only -- ops.ts's own comment,
+      // "'firm' moves no relationship edge" -- so the edge channel has
+      // nothing to attribute through here at all; the pair channel is the
+      // ONLY possible path to attribution for this tone.
+      expect(opEvent.deltas.length).toBeGreaterThan(0);
+      expect(opEvent.deltas.every((d) => d.op === 'node.set')).toBe(true);
+
+      const result = attribute(g2, [mkFirmReactionEntry()], em.all(), new Set([decision.id]));
+      expect(result.get('firm-reaction')).toEqual([opEvent.id]);
+    });
+
+    it('conciliatory (warm) envoys attribute via the loyalty edge delta, which carries char:ruler (unaffected by the fix)', () => {
+      const g = thornfieldGraph(); // char:osric already carries a loyalty edge to char:ruler
+      const em = makeEmitter(5);
+      const decision = em.emit('decision.recorded', { data: {} });
+      const g2 = applyOp(g, { kind: 'send_envoy', charId: 'char:osric', tone: 'conciliatory' }, 5, em, 'seat:throne', [decision.id]);
+      const opEvent = em.all().find((e) => e.type === 'op.send_envoy')!;
+      expect(opEvent.deltas.some((d) => d.op === 'edge.set')).toBe(true); // sanity: moves the existing loyalty edge
+
+      const result = attribute(g2, [mkFirmReactionEntry()], em.all(), new Set([decision.id]));
+      expect(result.get('firm-reaction')).toEqual([opEvent.id]);
+    });
+
+    it('threatening envoys attribute via their grudge/loyalty edge deltas, which carry char:ruler (unaffected by the fix)', () => {
+      const g = thornfieldGraph();
+      const em = makeEmitter(5);
+      const decision = em.emit('decision.recorded', { data: {} });
+      const g2 = applyOp(g, { kind: 'send_envoy', charId: 'char:osric', tone: 'threatening' }, 5, em, 'seat:throne', [decision.id]);
+      const opEvent = em.all().find((e) => e.type === 'op.send_envoy')!;
+      expect(opEvent.deltas.some((d) => d.op === 'edge.add' || d.op === 'edge.set')).toBe(true); // sanity: moves grudge and/or loyalty
+
+      const result = attribute(g2, [mkFirmReactionEntry()], em.all(), new Set([decision.id]));
+      expect(result.get('firm-reaction')).toEqual([opEvent.id]);
+    });
+  });
+
+  // Ride-along (carry triage #3): per-delta refusal must hold even when a
+  // literal-carrying delta and a read-set-matching delta both exist within
+  // the SAME event, but never on the SAME delta. Pins the invariant
+  // matchesRead/attribute() already rely on (each delta is checked in
+  // isolation -- see attribute()'s own loop) rather than accidentally
+  // proving it only via patterns where it happens not to matter. Passes
+  // both before and after the final-review fix -- this is not new
+  // behavior, it's the existing per-delta discipline made explicit so a
+  // future refactor (e.g. toward playerWriteSet's AGGREGATE, which this
+  // file's header explicitly says attribute() must not use) cannot
+  // silently reintroduce cross-delta contamination.
+  it('(h) cross-delta contamination: a literal-carrying delta cannot rescue a coarse edge hit from a DIFFERENT delta in the same event', () => {
+    // imprison(char:osric) lands ALL of these in one event (mirrors the
+    // playerWriteSet aggregation test above): edge.remove on osric's
+    // appointment edge (no literal), edge.add on a FRESH grudge edge to
+    // char:ruler (carries the literal, under a DIFFERENT edge type), plus
+    // three node.set stamps on osric alone.
+    const pattern: GraphPattern = {
+      nodes: [{ as: 'c', type: 'character' }, { as: 'o', type: 'office' }],
+      edges: [
+        { type: 'appointment', from: 'c', to: 'o' },       // read, but its own delta never touches char:ruler
+        { type: 'loyalty', from: 'c', to: '#char:ruler' },  // pins the literal; imprison never touches a loyalty edge at all
+      ],
+    };
+    function mkEntry(): EligibleEntry {
+      const storylet: Storylet = {
+        id: 'contamination-check', kind: 'brief', tier: 1, cooldownTicks: 0, once: false,
+        pattern, title: 't', body: 'b',
+        options: [{ id: 'a', label: 'a', ops: [] }, { id: 'b', label: 'b', ops: [] }],
+        defaultOptionId: 'a',
+      };
+      return { storylet, binding: { c: 'char:osric', o: 'office:steward' }, instanceKey: 'contamination-check' };
+    }
+
+    const g = thornfieldGraph();
+    const em = makeEmitter(5);
+    const decision = em.emit('decision.recorded', { data: {} });
+    const g2 = applyOp(g, { kind: 'imprison', charId: 'char:osric' }, 5, em, 'seat:throne', [decision.id]);
+    const opEvent = em.all().find((e) => e.type === 'op.imprison')!;
+    // sanity: this one event really does carry both halves of the
+    // contamination hazard -- a read edge type with no literal (appointment)
+    // and a literal-carrying edge of a type the pattern never reads (grudge).
+    expect(opEvent.deltas.some((d) => d.op === 'edge.remove')).toBe(true);
+    expect(opEvent.deltas.some((d) => d.op === 'edge.add' && d.edge.type === 'grudge' && d.edge.dst === 'char:ruler')).toBe(true);
+
+    const result = attribute(g2, [mkEntry()], em.all(), new Set([decision.id]));
+    expect(result.has('contamination-check')).toBe(false);
+  });
 });
 
 // T1 review carry: the wider suite never asserted multi-tick cast ORDER.
@@ -344,5 +475,78 @@ describe('end-to-end via resolveTick: attribution survives real casting (T1 revi
     expect(out2.packet.briefs.find((b) => b.storyletId === 'et.player')?.becauseOf).toEqual([opEvent.id]);
     expect(out2.packet.briefs.find((b) => b.storyletId === 'et.world')?.becauseOf).toBeUndefined();
     expect(out2.packet.briefs.find((b) => b.storyletId === 'et.standing')?.becauseOf).toBeUndefined();
+  });
+
+  // Whole-wave final-review fix, Fix 1's own semantics-consequences carry:
+  // attribution is computed ONLY over newlyEligibleEntries (tick.ts step 9),
+  // so a brief the possibility-diff correctly keeps STANDING through a
+  // cooldown cycle never reaches attribute() at all -- no becauseOf, no
+  // matter what the player wrote that tick. Pre-fix, a cooldown re-entry was
+  // misread as newly (Fix 1's own defect), so IF a coincidental player
+  // write that tick happened to intersect the recycling brief's read-set,
+  // attribute() -- asked about it only because of the casting bug -- would
+  // mislabel it "because of your order" for a brief that had nothing to do
+  // with that write. This fixture makes the coincidence land on purpose
+  // (the recycler's own where-clause reads `place|granary`, and the
+  // coincident write is a real stockpile_grain op that touches granary) so
+  // the test is a genuine RED against unfixed ec7372b, not a vacuous one.
+  it("a pure cooldown re-entry is not attributed even when an unrelated player write coincides AND intersects its read-set (RED against unfixed ec7372b)", () => {
+    const base = starterSeason();
+    function mkRecycler(): Storylet {
+      return {
+        id: 'recycler', kind: 'brief', tier: 1, cooldownTicks: 2, once: false,
+        // Threshold far above anything thornfield's granary reaches in 3
+        // ticks -- always true, so the pattern is possible every tick --
+        // but the where-clause still puts a real (place, granary) pair in
+        // this storylet's read-set, so an unrelated granary write CAN
+        // coincidentally intersect it.
+        pattern: { nodes: [{ as: 'p', type: 'place', where: [{ prop: 'granary', cmp: 'lt', value: fx('999999') }] }] },
+        title: 'recycler', body: 'recycler',
+        options: [{ id: 'ack', label: 'Acknowledge', ops: [] }, { id: 'skip', label: 'Skip', ops: [] }],
+        defaultOptionId: 'skip',
+      };
+    }
+    function mkAnchor(): Storylet {
+      return {
+        id: 'anchor', kind: 'brief', tier: 1, cooldownTicks: 0, once: false,
+        pattern: { nodes: [{ as: 'p', type: 'place' }] },
+        title: 'anchor', body: 'anchor',
+        options: [{ id: 'ack', label: 'Acknowledge', ops: [] }, { id: 'skip', label: 'Skip', ops: [] }],
+        defaultOptionId: 'skip',
+      };
+    }
+    const season: SeasonConfig = {
+      ...base,
+      decks: [{ id: 'starter', tier: 1, storylets: [mkRecycler(), mkAnchor()] }],
+      tiers: { ...base.tiers, 1: { ...base.tiers[1]!, briefBudget: 2 } },
+      calendar: [],
+    };
+    const empty = { seatId: 'seat:throne', choices: [] };
+    const f5 = makeFortune('cooldown-reentry-attribution-seed');
+
+    // Tick 1: both possible (empty prior possibility set) -- budget 2, both dealt.
+    const out1 = resolveTick(season, initialState(season), empty, f5);
+    expect(out1.packet.briefs.map((b) => b.storyletId).sort()).toEqual(['anchor', 'recycler']);
+
+    // Tick 2: recycler's cooldown is active (2 - 1 = 1 < 2) -- excluded
+    // from the DEALT pool. No player write this call.
+    const out2 = resolveTick(season, out1.state, empty, f5);
+    expect(out2.packet.briefs.map((b) => b.storyletId)).toEqual(['anchor']);
+    const anchorBrief2 = out2.packet.briefs[0]!;
+
+    // Tick 3: recycler's cooldown clears (3 - 1 = 2, not < 2) -- back in
+    // the dealt pool. This call ALSO submits an unrelated player write
+    // (stockpile_grain, via a directive riding anchor's tick-2 brief) that
+    // touches granary -- a real intersection with recycler's read-set.
+    // Under the fix, recycler's pattern was possible continuously (its
+    // where-clause is trivially true throughout), so it lands STANDING
+    // here, not newly -- attribute() is never even asked about it.
+    const out3 = resolveTick(season, out2.state, {
+      seatId: 'seat:throne',
+      choices: [{ briefId: anchorBrief2.briefId, ops: [{ kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '10' }], via: 'directive' }],
+    }, f5);
+    expect(out3.packet.briefs.map((b) => b.storyletId)).toContain('recycler');
+    const recyclerBrief3 = out3.packet.briefs.find((b) => b.storyletId === 'recycler')!;
+    expect(recyclerBrief3.becauseOf).toBeUndefined();
   });
 });

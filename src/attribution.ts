@@ -69,15 +69,53 @@
 // removed within the SAME tick) can't rely on either the pre- or post-tick
 // graph consistently still holding it.
 //
-// Refinement rule (per the plan, verbatim: "where the pattern pins a
-// literal id, the matching delta must carry that id"): read as a GLOBAL
-// gate, not scoped to whichever pattern fragment introduced the literal --
-// if a pattern's literals set is non-empty at all, EVERY delta match (via
-// pairs OR edges) additionally requires that SAME delta's touched ids to
-// intersect the pattern's literals. An unpinned pattern (empty literals,
-// test (d)) skips the gate entirely -- coarse (nodeType, prop) matches
-// stand on their own, over-attribution accepted by design ("errs toward
-// 'the world answers'").
+// Refinement rule (whole-wave final-review fix; supersedes this file's
+// original reading of the plan's "where the pattern pins a literal id, the
+// matching delta must carry that id" as a GLOBAL gate over every delta
+// match): literal-pin refinement applies ONLY to EDGE-channel hits, never
+// to node.set/pair hits. Concretely -- and this is the rule T6 content
+// authors write against -- matchesRead dispatches per delta CHANNEL, not
+// per pattern:
+//   - a node.set delta whose (nodeType, prop) pair is in the pattern's
+//     read-set attributes on that coarse base hit ALONE, unconditionally,
+//     regardless of whether the same pattern also pins a literal id
+//     somewhere in an edge fragment;
+//   - an edge.add/edge.remove/edge.set delta whose edgeType is in the
+//     pattern's read-set additionally requires -- exactly the pre-fix rule,
+//     just scoped to this one channel -- that its own touched ids intersect
+//     the pattern's literals, whenever the pattern pins any literal at all.
+// This is a clean dispatch, not a heuristic, because deltaWrite makes every
+// delta unambiguously one channel: it produces `pair` XOR `edgeType`, never
+// both (see DeltaWrite below).
+//
+// Why node.set is exempt: a literal can only ever originate from a
+// '#'-pinned EDGE ENDPOINT (match.ts -- node patterns have no pinning
+// mechanism at all; no node var is ever itself "the literal"). A node.set
+// delta's own `ids` is always exactly the one node it wrote -- it
+// structurally cannot carry some OTHER node's id that the same pattern
+// separately pins via an unrelated edge fragment. Gating it on one anyway
+// was a category error (the whole-wave review's finding): it silently made
+// every node-prop reaction gated behind a literal-pinned CONTEXT edge --
+// "this char, who has SOME loyalty edge to #char:ruler, just did X," where
+// the char var itself is unpinned and the edge exists only to scope the
+// read -- unattributable by construction, since the char's own prop writes
+// could never carry the ruler's id no matter what actually happened. Two
+// content-realistic reactions to the SAME deed (e.g. send_envoy's three
+// tones) could then land inconsistent attribution purely because one
+// tone's deed happens to move a relationship edge and another's doesn't
+// (regression: test/attribution.test.ts's firm-envoy scenario).
+//
+// This does NOT reopen the over-attribution scenario the original global
+// gate was added to catch (test (c): a pattern pinning #char:alwyn via an
+// edge, probed with a write on a DIFFERENT character) -- verified by
+// tracing it, not by assumption. That pattern's node var carries no
+// where-clause at all, so its read-set's `pairs` is EMPTY; the test's
+// protection was never actually coming from the literal gate to begin
+// with, it's the coarse base hit failing outright (no pair in the
+// read-set for ANY node.set to match against). Test (d)'s
+// coarse-match-with-no-literal case is untouched either way
+// (reads.literals.size === 0 already skipped the gate pre-fix, on both
+// the pair and edge channels).
 import type { ChronicleEvent, GraphDelta } from './events.js';
 import type { GraphPattern } from './match.js';
 import type { WorldGraph } from './graph.js';
@@ -142,6 +180,10 @@ function edgeIdParts(id: string): { type: string; src: string; dst: string } {
   return { type, src: rest.slice(0, arrow), dst: rest.slice(arrow + 2) };
 }
 
+// pair XOR edgeType, never both -- every real case below sets exactly one.
+// matchesRead's channel dispatch (this file's header, "Refinement rule")
+// depends on that exclusivity being structurally guaranteed here, not just
+// true by convention at call sites.
 interface DeltaWrite { pair?: string; edgeType?: string; ids: string[] }
 
 // Per-delta write contribution -- null for node.add/node.remove, which sit
@@ -157,8 +199,27 @@ function deltaWrite(g: WorldGraph, d: GraphDelta): DeltaWrite | null {
       const { type, src, dst } = edgeIdParts(d.id);
       return { edgeType: type, ids: [src, dst] };
     }
-    default:
+    // node.add/node.remove are enumerated explicitly (ride-along, whole-
+    // wave final review) rather than falling into the default below, so
+    // the ONLY way into that default is a GraphDelta variant this switch
+    // has never heard of.
+    case 'node.add':
+    case 'node.remove':
       return null;
+    default: {
+      // Exhaustiveness guard: every real GraphDelta op is named above, so
+      // `d` is typed `never` here -- this assignment is the compile-time
+      // trip-wire. A future variant added to events.ts's GraphDelta union
+      // without a matching case here makes `d` something OTHER than
+      // `never`, which fails to compile right here instead of silently
+      // returning null (which this file's write-set formula reads as "not
+      // part of the formula," a claim that must stay deliberate, never
+      // accidental-by-omission). The runtime throw is unreachable through
+      // any well-typed call; it only guards a caller that bypasses the
+      // type system (e.g. an `as GraphDelta` cast).
+      const exhaustive: never = d;
+      throw new Error(`deltaWrite: unhandled GraphDelta op '${(exhaustive as GraphDelta).op}'`);
+    }
   }
 }
 
@@ -213,14 +274,27 @@ export function playerWriteSet(
   return { pairs, edges, ids };
 }
 
-/** A single delta's write matches a read-set: a base hit via pairs or
- *  edges, refined (per this file's header) by literal-carry whenever the
- *  pattern pins any literal id at all. */
+/** A single delta's write matches a read-set. Dispatches per CHANNEL (per
+ *  this file's header, "Refinement rule") rather than computing one shared
+ *  base-hit first: `w` is unambiguously pair XOR edgeType (deltaWrite's own
+ *  guarantee), so exactly one arm below ever applies to a given delta.
+ *  - pair (node.set): attributes on the coarse (nodeType, prop) match
+ *    alone -- literal-pin refinement never applies to this channel, because
+ *    a node.set delta's `ids` can only ever be the one node it wrote, never
+ *    some OTHER node a literal pins elsewhere in the same pattern (node
+ *    patterns have no pinning mechanism of their own -- match.ts).
+ *  - edgeType (edge.add/remove/set): attributes on the coarse edgeType
+ *    match, further refined -- exactly the pre-fix rule, just scoped to
+ *    this channel -- by literal-carry whenever the pattern pins any literal
+ *    id at all: the SAME delta's touched ids must intersect the pattern's
+ *    literals. */
 function matchesRead(reads: ReadSet, w: DeltaWrite): boolean {
-  const baseHit = (w.pair !== undefined && reads.pairs.has(w.pair)) || (w.edgeType !== undefined && reads.edges.has(w.edgeType));
-  if (!baseHit) return false;
-  if (reads.literals.size === 0) return true;
-  return w.ids.some((id) => reads.literals.has(id));
+  if (w.pair !== undefined) return reads.pairs.has(w.pair);
+  if (w.edgeType !== undefined) {
+    if (!reads.edges.has(w.edgeType)) return false;
+    return reads.literals.size === 0 || w.ids.some((id) => reads.literals.has(id));
+  }
+  return false;
 }
 
 /** For each newly-eligible entry, which of this tick's player-descended

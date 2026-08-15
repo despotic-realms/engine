@@ -128,6 +128,68 @@ export function eligibleStorylets(
   return out;
 }
 
+// Causality §1 (whole-wave final-review fix): the PATTERN-POSSIBILITY set --
+// every instance whose pattern binds against `g` right now, structurally
+// UNFILTERED by cooldowns or firedOnce (contrast eligibleStorylets just
+// above, which applies both gates before admitting an instance -- that
+// filtered result remains the DEALT pool tick.ts hands to
+// examiner.select, unchanged by this function's existence). Tick-
+// independent by construction: with no cooldown/firedOnce gate to
+// evaluate, there is no tick-shaped input left to take, so unlike
+// eligibleStorylets this never needs one.
+//
+// Deliberately re-walks decks/storylets/patterns rather than threading a
+// second return value through eligibleStorylets itself ("one extra match
+// sweep," not "a dual return"): eligibleStorylets' existing (g, decks,
+// cooldowns, tick, firedOnce) -> EligibleEntry[] signature and return shape
+// are their own public surface, exercised directly by several tests
+// (test/storylet.test.ts, test/generator.test.ts) and by
+// test/recency.test.ts's own tick-1 cross-check -- changing its contract
+// to also carry an unfiltered set would ripple well past tick.ts's step 9,
+// where this fix is scoped. A sibling function costs one extra
+// matchPattern pass per storylet per tick; storylet/deck counts are small
+// (content-authored, not procedurally generated at scale), so the
+// allocation is a non-issue next to the correctness this buys: a brief
+// whose cooldown merely expired was ALSO possible last tick (its pattern
+// never stopped binding), so it can never again be misread as newly
+// eligible just because cooldown/firedOnce happened to hide it from the
+// DEALT pool for a tick or two.
+//
+// perBinding generators: EVERY binding satisfying the raw pattern counts
+// as possible here -- this function does NOT apply maxInstancesPerTick's
+// cap. The cap is a DEALING throttle (how many of a generator's
+// currently-satisfying bindings get offered this tick), not a fact about
+// any one instanceKey's own pattern -- and capping here would reintroduce
+// a subtler version of the exact bug this function exists to fix:
+// eligibleStorylets' cap-then-take loop lets a LATER binding "slide into"
+// the cap window purely because an EARLIER one is mid-cooldown (see
+// test/generator.test.ts's "cooldowns are per instance, not per
+// generator"), which would make that later binding's possibility-set
+// membership depend on cooldown timing once more, one level up. Skipping
+// the cap here means a perBinding storylet's possibility set is exactly
+// "every binding whose own pattern currently matches," full stop --
+// stable across ticks for a static graph, and correct even for a binding
+// that would never survive into the top-`cap` window (it still gets
+// flagged newly the one tick its own pattern starts matching, which the
+// capped alternative could miss entirely for a binding sorting outside
+// the window).
+export function possibleStorylets(g: WorldGraph, decks: readonly Deck[]): EligibleEntry[] {
+  const out: EligibleEntry[] = [];
+  const sortedDecks = [...decks].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const deck of sortedDecks) {
+    for (const s of [...deck.storylets].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
+      const bindings = matchPattern(g, s.pattern);
+      if (bindings.length === 0) continue;
+      if (s.perBinding === true) {
+        for (const binding of bindings) out.push({ storylet: s, binding, instanceKey: `${s.id}@${bindingKey(binding)}` });
+      } else {
+        out.push({ storylet: s, binding: bindings[0]!, instanceKey: s.id });
+      }
+    }
+  }
+  return out;
+}
+
 export function checkDeck(deck: Deck, fixtures: readonly WorldGraph[]): DeckProblem[] {
   const problems: DeckProblem[] = [];
   const seen = new Set<string>();
