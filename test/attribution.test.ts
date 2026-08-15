@@ -114,9 +114,12 @@ describe('playerWriteSet: ancestry filter + aggregation', () => {
     const g = thornfieldGraph(); // char:osric holds office:steward via an appointment edge
     const em = makeEmitter(5);
     const decision = em.emit('decision.recorded', { data: {} });
-    const g2 = applyOp(g, { kind: 'imprison', charId: 'char:osric' }, 5, em, [decision.id]);
+    const g2 = applyOp(g, { kind: 'imprison', charId: 'char:osric' }, 5, em, 'seat:throne', [decision.id]);
     const ws = playerWriteSet(g2, em.all(), new Set([decision.id]));
-    expect(ws.pairs).toEqual(new Set(['character|imprisoned']));
+    // Causality §2 (T3): imprison is a deed-producing arm now -- its own
+    // node.set stamps (recent:imprisoned, recent:imprisoned:at) ride the
+    // SAME event as the 'imprisoned' flag flip, so they join the write-set too.
+    expect(ws.pairs).toEqual(new Set(['character|imprisoned', 'character|recent:imprisoned', 'character|recent:imprisoned:at']));
     expect(ws.edges).toEqual(new Set(['appointment', 'grudge'])); // appointment removed, grudge added
     expect(ws.ids).toContain('char:osric');
     expect(ws.ids).toContain('office:steward'); // the vacated appointment's dst, carried via edge.remove parsing
@@ -128,7 +131,7 @@ describe('attribute: causality §1 test scenarios', () => {
     const g = thornfieldGraph();
     const em = makeEmitter(5);
     const decision = em.emit('decision.recorded', { data: { briefId: 'b5.0', optionId: 'stockpile', via: 'option', attended: true } });
-    const g2 = applyOp(g, { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }, 5, em, [decision.id]);
+    const g2 = applyOp(g, { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }, 5, em, 'seat:throne', [decision.id]);
     const opEvent = em.all().find((e) => e.type === 'op.stockpile_grain')!;
 
     const result = attribute(g2, [mkPlaceEntry('granary-brief')], em.all(), new Set([decision.id]));
@@ -171,7 +174,7 @@ describe('attribute: causality §1 test scenarios', () => {
       const g = thornfieldGraph(); // char:osric already carries a loyalty edge to char:ruler (edge.set path)
       const em = makeEmitter(5);
       const decision = em.emit('decision.recorded', { data: {} });
-      const g2 = applyOp(g, { kind: 'send_envoy', charId: 'char:osric', tone: 'conciliatory' }, 5, em, [decision.id]);
+      const g2 = applyOp(g, { kind: 'send_envoy', charId: 'char:osric', tone: 'conciliatory' }, 5, em, 'seat:throne', [decision.id]);
       expect(em.all().some((e) => e.type === 'op.send_envoy' && e.deltas.some((d) => d.op === 'edge.set'))).toBe(true); // sanity: exercises the edge.set parse path
 
       const result = attribute(g2, [mkAlwynPinnedEntry()], em.all(), new Set([decision.id]));
@@ -182,7 +185,7 @@ describe('attribute: causality §1 test scenarios', () => {
       const g = addNode(thornfieldGraph(), { id: 'char:alwyn', type: 'character', props: { name: 'Alwyn' } });
       const em = makeEmitter(5);
       const decision = em.emit('decision.recorded', { data: {} });
-      const g2 = applyOp(g, { kind: 'send_envoy', charId: 'char:alwyn', tone: 'conciliatory' }, 5, em, [decision.id]);
+      const g2 = applyOp(g, { kind: 'send_envoy', charId: 'char:alwyn', tone: 'conciliatory' }, 5, em, 'seat:throne', [decision.id]);
       const opEvent = em.all().find((e) => e.type === 'op.send_envoy')!;
       expect(opEvent.deltas.some((d) => d.op === 'edge.add')).toBe(true); // sanity: alwyn has no prior edges -- exercises the edge.add path
 
@@ -195,7 +198,7 @@ describe('attribute: causality §1 test scenarios', () => {
     const g0 = addNode(thornfieldGraph(), { id: 'place:otherhold', type: 'place', props: { name: 'Otherhold', granary: fx('50') } });
     const em = makeEmitter(5);
     const decision = em.emit('decision.recorded', { data: {} });
-    const g2 = applyOp(g0, { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }, 5, em, [decision.id]);
+    const g2 = applyOp(g0, { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }, 5, em, 'seat:throne', [decision.id]);
     const opEvent = em.all().find((e) => e.type === 'op.stockpile_grain')!;
 
     // entryForB's binding names place:otherhold -- the pattern itself names
@@ -241,8 +244,8 @@ describe('attribute: causality §1 test scenarios', () => {
     const em = makeEmitter(5);
     const d1 = em.emit('decision.recorded', { data: { briefId: 'b5.0' } });
     const d2 = em.emit('decision.recorded', { data: { briefId: 'b5.1' } });
-    let g2 = applyOp(g, { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '10' }, 5, em, [d1.id]);
-    g2 = applyOp(g2, { kind: 'release_grain', placeId: 'place:thornfield', amount: '5' }, 5, em, [d2.id]);
+    let g2 = applyOp(g, { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '10' }, 5, em, 'seat:throne', [d1.id]);
+    g2 = applyOp(g2, { kind: 'release_grain', placeId: 'place:thornfield', amount: '5' }, 5, em, 'seat:throne', [d2.id]);
     const opEvents = em.all().filter((e) => e.type.startsWith('op.'));
     expect(opEvents).toHaveLength(2); // both are node.set on granary -- both should attribute
 

@@ -17,7 +17,8 @@ import type { Emitter, GraphDelta } from './events.js';
 import { clampFx, divFx, fx, fxFromInt, fxToString, mulFx, FX_ZERO } from './fx.js';
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
-import { appendAllegianceLog, edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, foldAllegianceDrift, getNode, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
+import { appendAllegianceLog, edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, foldAllegianceDrift, getNode, nodeIds, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
+import { DEED_NAMES, FINGERPRINT_TICKS } from './ops.js';
 
 const UNREST_MAX = fx('100');
 
@@ -242,5 +243,48 @@ export function socialStep(g0: WorldGraph, tick: number, em: Emitter): WorldGrap
       g = setNodeProp(g, place.id, 'unrest', clampFx(unrest - fx('1'), FX_ZERO, UNREST_MAX));
     }
   }
+  return g;
+}
+
+// Causality §2: deed fingerprint decay. Unlike drift/decay above (no
+// discrete cause, no chronicle), a fingerprint's presence is content-gated
+// state -- kit law gates reaction scenes on `recent:<deed> ne ''` -- so its
+// clearing IS chronicle-worthy, the same way the exposed-skimmer
+// grudge.kindled kindle above earns a real event despite living in this
+// "continuous background process" function's neighborhood. `node.set` has
+// no delete: "clearing" means overwriting recent:<deed> back to '' (the
+// same value an untouched node already reads as absent under evalPredicate/
+// the `ne ''` exists-idiom, match.ts) and recent:<deed>:at to -1 (a tick
+// that can never legitimately occur, since ticks start at 0 and only climb
+// -- pure hygiene: the decay CONDITION itself is gated on the seat value,
+// not on :at, so a repeat pass can never re-fire regardless of this choice).
+//
+// Order-stable per the plan's own call-out ("the decay pass especially"):
+// outer loop over nodeIds(g) (already sorted), inner loop over the closed,
+// fixed-order DEED_NAMES array -- both loops are deterministic by
+// construction, so the resulting fades[] order (and thus deltas[] order) is
+// reproducible without an extra sort. One `fingerprints.faded` event per
+// tick carries EVERY fade (never one event per fade); no event at all when
+// nothing faded. A systemic pass: `parents` is never set (defaults to []),
+// so this can never read as player-descended (T2's ancestry invariant).
+export function fingerprintDecayStep(g0: WorldGraph, tick: number, em: Emitter): WorldGraph {
+  let g = g0;
+  const deltas: GraphDelta[] = [];
+  const fades: Array<{ nodeId: string; deed: string; seatId: string; at: number }> = [];
+  for (const id of nodeIds(g)) {
+    const props = getNode(g, id).props;
+    for (const deed of DEED_NAMES) {
+      const seatVal = props[`recent:${deed}`];
+      if (typeof seatVal !== 'string' || seatVal === '') continue; // never stamped, or already decayed
+      const atVal = props[`recent:${deed}:at`];
+      if (typeof atVal !== 'number' || tick - atVal <= FINGERPRINT_TICKS) continue;
+      deltas.push({ op: 'node.set', id, key: `recent:${deed}`, value: '' });
+      deltas.push({ op: 'node.set', id, key: `recent:${deed}:at`, value: -1 });
+      fades.push({ nodeId: id, deed, seatId: seatVal, at: atVal });
+    }
+  }
+  if (fades.length === 0) return g;
+  g = applyDeltas(g, deltas);
+  em.emit('fingerprints.faded', { deltas, data: { fades } });
   return g;
 }

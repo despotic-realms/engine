@@ -369,7 +369,7 @@ describe('character arcs wired into resolveTick', () => {
       willingness: false,
     };
     const medEm = makeEmitter(13);
-    const g2 = applyMediatedOp(g, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '5' }, 13, makeFortune('med'), medEm, medConfig, []);
+    const g2 = applyMediatedOp(g, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '5' }, 13, makeFortune('med'), medEm, medConfig, 'seat:throne', []);
     expect(g2).toBe(g); // graph unchanged on rejection
     const rejected = medEm.all().find((e) => e.type === 'op.rejected');
     expect(rejected).toBeDefined();

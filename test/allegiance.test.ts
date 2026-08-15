@@ -22,7 +22,7 @@ function apply(g: WorldGraph, tick: number, op: unknown): { g: WorldGraph; event
   const em = makeEmitter(tick);
   const r = validateOp(g, op);
   if (!r.ok) throw new Error(r.error);
-  const g2 = applyOp(g, r.op, tick, em, []);
+  const g2 = applyOp(g, r.op, tick, em, 'seat:throne', []);
   return { g: g2, eventId: em.all()[0]!.id };
 }
 
@@ -38,7 +38,7 @@ describe('allegiance reason logs (spec §5)', () => {
     const em = makeEmitter(4);
     const r = validateOp(g0, { kind: 'seize', charId: 'char:vane', amount: '100' });
     if (!r.ok) throw new Error(r.error);
-    const post = applyOp(g0, r.op, 4, em, []);
+    const post = applyOp(g0, r.op, 4, em, 'seat:throne', []);
     const ev = em.all()[0]!;
 
     const edge = findEdge(post, 'grudge', 'char:vane', 'char:ruler');
@@ -129,7 +129,7 @@ describe('allegiance reason logs (spec §5)', () => {
       const em = makeEmitter(1);
       const r = validateOp(g0, { kind: 'grant', charId: 'char:osric', amount: '20' });
       if (!r.ok) throw new Error(r.error);
-      const afterOp = applyOp(g0, r.op, 1, em, []);
+      const afterOp = applyOp(g0, r.op, 1, em, 'seat:throne', []);
       const live = socialStep(afterOp, 1, em); // same tick, same emitter -- mirrors resolveTick's own order
 
       const opDeltas = em.all().find((e) => e.type === 'op.grant')!.deltas;

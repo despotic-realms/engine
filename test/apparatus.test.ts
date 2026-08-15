@@ -106,7 +106,7 @@ describe('vet: applyOp', () => {
     const g0 = baseGraph();
     const r = validateOp(g0, { kind: 'vet', charId: 'char:target' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('295'));
     expect(em.all()[0]?.type).toBe('op.vet');
     expect(em.all()[0]?.data).toEqual({ kind: 'vet', charId: 'char:target' });
@@ -134,7 +134,7 @@ describe('obscure_records: applyOp', () => {
     const g0 = baseGraph();
     const r = validateOp(g0, { kind: 'obscure_records' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('290'));
     expect(getNode(g, 'inst:crown').props['counterIntel']).toBe(true);
     expect(em.all()[0]?.type).toBe('op.obscure_records');
@@ -151,7 +151,7 @@ describe('vet/obscure_records: applyOp delta-equivalence (spec D14)', () => {
     const r = validateOp(g0, op);
     if (!r.ok) throw new Error(r.error);
     const em = makeEmitter(3);
-    const post = applyOp(g0, r.op, 3, em);
+    const post = applyOp(g0, r.op, 3, em, 'seat:throne');
     const ev = em.all()[0]!;
     expect(ev.deltas.length).toBeGreaterThan(0);
     expect(hashValue(applyDeltas(g0, ev.deltas))).toBe(hashValue(post));

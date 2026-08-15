@@ -30,7 +30,7 @@ import type { Band, WantKey } from './spine.js';
 import { WANT_FULFILL, currentWant } from './spine.js';
 import type { Deck, Storylet } from './storylet.js';
 import { bindOps, eligibleStorylets, renderTpl } from './storylet.js';
-import { economyStep, socialStep } from './systems.js';
+import { economyStep, fingerprintDecayStep, socialStep } from './systems.js';
 
 export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number; mediation?: MediationConfig }
 
@@ -275,12 +275,13 @@ function applyOpWithWants(
   tick: number,
   fortune: Fortune,
   em: Emitter,
+  seatId: string,
   parents: string[],
 ): WorldGraph {
   const before = em.all().length;
   let g2 = tierCfg.mediation
-    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, parents)
-    : applyOp(g, op, tick, em, parents);
+    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, seatId, parents)
+    : applyOp(g, op, tick, em, seatId, parents);
   const landedEvent = em.all().slice(before).find((e) => e.type === `op.${op.kind}`);
   if (landedEvent) g2 = advanceWants(g2, landedOp(op, landedEvent.data), tick, em, landedEvent.id);
   return g2;
@@ -321,7 +322,7 @@ export function resolveTick(
     for (const op of ops) {
       const r = validateOp(g, op);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
-      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, [decisionEvents.get(choice.briefId)!]);
+      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!]);
     }
   }
 
@@ -339,7 +340,7 @@ export function resolveTick(
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
       const r = validateOp(g, op);
       if (r.ok) {
-        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, [ev.id]);
+        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id]);
       } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
     }
   }
@@ -405,6 +406,13 @@ export function resolveTick(
   // 5-7. Systems.
   g = economyStep(g, tick, fortune, em);
   g = socialStep(g, tick, em);
+  // Causality §2: deed fingerprint decay, adjacent to socialStep (systems.ts)
+  // -- placed here for the same "no dependency either way" reason advanceArcs
+  // and character arcs sit next to each other below: fingerprint props are
+  // disjoint from everything economyStep/socialStep/advanceArcs touch, so
+  // ordering only affects which of this tick's events sort first, never the
+  // outcome.
+  g = fingerprintDecayStep(g, tick, em);
   g = advanceArcs(g, tick, season.calendar, em);
   // T8 (spec §5): character arcs generalize the famine machinery just
   // above to people -- same tick-driven systems step, same delta-native

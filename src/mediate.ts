@@ -185,6 +185,12 @@ function opKeyOf(op: Op): string {
   return canonJson(op);
 }
 
+// seatId: threaded straight through to applyOp unchanged, in BOTH branches
+// below (crown's own voice, and the post-band execution) -- mediated ops
+// execute on the throne's (or whichever seat's) BEHALF, so the fingerprint
+// a landed op stamps must credit the DECIDING seat, never `executorId` (the
+// office holder who mechanically did the work, scored by willingness/band
+// above). See src/ops.ts's applyOp for the stamp itself.
 export function applyMediatedOp(
   g: WorldGraph,
   op: Op,
@@ -192,10 +198,11 @@ export function applyMediatedOp(
   fortune: Fortune,
   em: Emitter,
   cfg: MediationConfig,
+  seatId: string,
   parents: string[] = [],
 ): WorldGraph {
   const domain = OP_KINDS[op.kind].domain;
-  if (domain === null) return applyOp(g, op, tick, em, parents); // crown's own voice, no office involved
+  if (domain === null) return applyOp(g, op, tick, em, seatId, parents); // crown's own voice, no office involved
 
   const officeId = cfg.officeForDomain[domain];
   const executorId = executorOf(g, officeId);
@@ -258,7 +265,7 @@ export function applyMediatedOp(
   if (band !== 'botched') {
     const scaled = scaleOp(op, band);
     const scaledCheck = validateOp(g2, scaled);
-    g2 = applyOp(g2, scaledCheck.ok ? scaled : op, tick, em, [executedEventId]);
+    g2 = applyOp(g2, scaledCheck.ok ? scaled : op, tick, em, seatId, [executedEventId]);
   }
 
   if (domain === greedySkim.domain && BANDS.indexOf(band) < BANDS.indexOf(greedySkim.belowBand) && hasTrait(g2, executorId, greedySkim.trait)) {
