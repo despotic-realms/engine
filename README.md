@@ -48,6 +48,7 @@ src/
   systems.ts           economy + social steps
   ladder.ts            tier rules + transitions
   scheduler.ts         policy interface, examiner, famine arc
+  attribution.ts       computed attribution (causality)
   tick.ts              resolveTick + packet + decisions validation
   replay.ts            runReign / replay / divergence
   demo.ts              CLI demo (only file allowed console)
@@ -122,6 +123,73 @@ competent spymaster (judge high enough) hears of the risk; an absent or
 unskilled holder hears nothing. The apparatus is the apparatus: designed to
 preserve the asymmetry between hidden and visible, between local knowledge
 (the crown's own graph) and hearsay (what the court believes).
+
+## Causality (v0.3)
+
+The world answers the player. Four mechanisms make a reign's briefs
+responsive to what the throne actually does, layered on top of the
+novelty-weighted lottery the scheduler already runs within every stratum
+below.
+
+**Recency casting** — the scheduler remembers which brief instances were
+eligible as of the previous tick (`ReignState.eligibleLastTick`) and diffs
+that snapshot against the current tick's eligible set. Newly-eligible briefs
+— ones that only just became possible — deal ahead of standing briefs that
+have sat eligible without being shown, so a reign's attention budget goes
+toward what just changed before it repeats what's already on offer.
+
+**Computed attribution** — within the newly-eligible set, the engine asks a
+narrower question: did the player's own decisions cause this, or did the
+world? Attribution is computed structurally every tick, never guessed and
+never drawn — no Fortune parameter is involved anywhere in it. The engine
+walks this tick's chronicle events back through their causal parents to find
+which are player-descended (their ancestry reaches one of this tick's own
+recorded decisions), then checks whether a candidate storylet's pattern reads
+anything those player-descended events wrote — by node type and prop, by
+edge type, and, wherever the pattern pins a literal node, by that exact id.
+A hit makes the brief player-attributed, and player-attributed briefs deal
+ahead of world-newly ones. A player-attributed `Brief` also carries
+`becauseOf`: the sorted ids of the attributing events, present only on
+attributed deals and absent everywhere else. It's packet-only and
+informational — a surface can render a "because of your order" label off
+it, but nothing in the core ever reads it back.
+
+**Deed fingerprints** — every consequential op stamps a short-lived,
+actor-valued marker on its target as part of its own delta bundle: a
+`recent:<deed>` prop holding the deciding seat's id (a seat id, never a
+character id — multiplayer-proofed from day one), and a `recent:<deed>:at`
+prop holding the tick it landed. Content gates a reaction scene on
+`recent:<deed>` being non-empty (the same `ne ''` exists-idiom used
+elsewhere in this engine's pattern predicates), or on a specific seat's id
+where the gate needs to be that precise. The deed vocabulary is closed, and
+content gates on these strings verbatim: `granted`, `seized`, `envoy-warm`,
+`envoy-firm`, `envoy-hard`, `audited`, `appointed`, `imprisoned`, `pardoned`,
+`vetted`, `festival`, `invested`, `grain-released`, `grain-bought`,
+`levy-raised`, `taxed`. A fingerprint doesn't last forever: once its window
+closes, a deterministic decay pass clears both props and emits a
+`fingerprints.faded` event carrying every fade that happened that tick (one
+event per tick, never one per fade).
+
+**Booked follow-ups** — a `StoryletOption` can name `books: { storyletId,
+withinTicks }`. Choosing that option books the named storylet as a
+follow-up in `ReignState.bookings`, due within the stated window — and this
+fires on every path that lands the option's ops, not only a direct attended
+choice: a brief that defaults, or is neglected past the attention cut,
+still books if the option that ends up applying carries `books`. A due,
+eligible booking force-deals, skipping the novelty lottery entirely, so an
+authored chain lands on schedule instead of competing with the rest of the
+pool. A booking that never becomes eligible within its window lapses
+unfilled rather than vanishing silently. Both outcomes are events:
+`scene.booked` when a booking is recorded, `scene.booking.lapsed` when one
+expires unfilled — both carry no graph deltas, the same
+state-field-lifecycle discipline character arcs already use.
+
+**Casting order** — the four mechanisms compose into one fixed order every
+tick: probes first (the benchmark instrument, forced regardless of anything
+else), then due bookings, then player-attributed newly-eligible briefs, then
+world newly-eligible briefs, then the standing pool — with the
+novelty-weighted lottery still deciding ties within whichever stratum is
+being drawn from.
 
 ## What a host adds
 
