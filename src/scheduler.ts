@@ -67,19 +67,30 @@ export interface SchedulerPolicy {
 // lottery; an all-tied pool (the common case early in a reign, or any
 // single-partition call) is exactly the old unstratified draw. Extracted for
 // causality §1 (recency casting) so it can run once per [newly, standing]
-// partition -- called on a pool as its ONLY partition (the other left empty),
-// this is byte-for-byte the pre-T1 loop: same slot indices from 0, same
-// stratify-then-pick shape, same fortune draws.
+// partition -- but fortune.pick('casting', tick, 'slot', stratum, slot) is a
+// pure hash of (tick, 'slot', slot), only reduced onto `stratum` afterward
+// by modulo, so two calls that both start counting slots at 0 in the same
+// tick collide: the newly partition's k-th draw and the standing
+// partition's k-th draw hash the identical key. `startSlot` fixes this --
+// the caller threads the counter across both calls (standing picks up where
+// newly left off), so every draw in a tick gets a unique slot regardless of
+// which partition it lands in. A pool called as the ONLY partition (the
+// other left empty, startSlot 0) is still byte-for-byte the pre-T1 loop:
+// same slot indices from 0, same stratify-then-pick shape, same fortune
+// draws -- an empty partition consumes zero slots (the loop body never
+// runs), so the surviving partition draws 0,1,2,... exactly as before.
 function castByNovelty(
   pool: readonly EligibleEntry[],
   budget: number,
   presented: Record<string, number>,
   fortune: Fortune,
   tick: number,
-): EligibleEntry[] {
+  startSlot: number,
+): { chosen: EligibleEntry[]; nextSlot: number } {
   const chosen: EligibleEntry[] = [];
   let remaining = pool;
-  for (let slot = 0; chosen.length < budget && remaining.length > 0; slot++) {
+  let slot = startSlot;
+  for (; chosen.length < budget && remaining.length > 0; slot++) {
     // Min by hand, not Math.min (banned in core, see ops.ts's clampBp).
     let minCount = presented[remaining[0]!.instanceKey] ?? 0;
     for (const e of remaining) {
@@ -91,7 +102,7 @@ function castByNovelty(
     chosen.push(pick);
     remaining = remaining.filter((e) => e !== pick);
   }
-  return chosen;
+  return { chosen, nextSlot: slot };
 }
 
 export const examiner: SchedulerPolicy = {
@@ -116,12 +127,17 @@ export const examiner: SchedulerPolicy = {
     // eligible, at equal presented counts. A tick where every eligible brief
     // is newly-eligible (tick 1: ReignState.eligibleLastTick starts empty,
     // so the diff is the whole pool) leaves `standing` empty and collapses
-    // to the single castByNovelty call pre-T1 select() always made.
+    // to the single castByNovelty call pre-T1 select() always made. The
+    // slot counter is threaded from newly into standing (not restarted at
+    // 0) so the two partitions' draws never hash the same fortune key --
+    // see castByNovelty's comment.
     const remaining = pool.filter((e) => !chosen.includes(e));
     const newly = remaining.filter((e) => newlyEligible.has(e.instanceKey));
     const standing = remaining.filter((e) => !newlyEligible.has(e.instanceKey));
-    chosen.push(...castByNovelty(newly, briefBudget - chosen.length, presented, fortune, tick));
-    chosen.push(...castByNovelty(standing, briefBudget - chosen.length, presented, fortune, tick));
+    const newlyCast = castByNovelty(newly, briefBudget - chosen.length, presented, fortune, tick, 0);
+    chosen.push(...newlyCast.chosen);
+    const standingCast = castByNovelty(standing, briefBudget - chosen.length, presented, fortune, tick, newlyCast.nextSlot);
+    chosen.push(...standingCast.chosen);
     return { chosen, letters, skippedProbes };
   },
 };
