@@ -132,10 +132,11 @@ novelty-weighted lottery the scheduler already runs within each
 eligible-brief stratum below — probes and due bookings force-deal instead,
 drawing nothing.
 
-**Recency casting** — the scheduler remembers which brief instances were
-eligible as of the previous tick (`ReignState.eligibleLastTick`) and diffs
-that snapshot against the current tick's eligible set. Newly-eligible briefs
-— ones that only just became possible — deal ahead of standing briefs that
+**Recency casting** — the scheduler remembers which brief instances the
+world made possible as of the previous tick (`ReignState.eligibleLastTick`,
+the pattern-possibility snapshot, unfiltered by cooldowns or fire caps) and
+diffs it against what is possible now. Newly-eligible briefs
+— ones the world only just made possible — deal ahead of standing briefs that
 have sat eligible without being shown, so a reign's attention budget goes
 toward what just changed before it repeats what's already on offer.
 

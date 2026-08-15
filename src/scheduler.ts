@@ -51,8 +51,10 @@ export interface SchedulerContext {
   presented: Record<string, number>;
   /** Instance keys eligible now but NOT last tick (causality §1: recency
    *  casting -- "the world answers the player" starts here). tick.ts diffs
-   *  this tick's eligible brief set against ReignState.eligibleLastTick (the
-   *  prior snapshot) and hands in the difference; select partitions its
+   *  this tick's pattern-possibility set (which instances' patterns bind,
+   *  unfiltered by cooldowns/firedOnce/caps) against
+   *  ReignState.eligibleLastTick (the prior possibility snapshot) and hands
+   *  in the difference; select partitions its
    *  non-probe pool into [newly, standing] and runs D13's novelty lottery
    *  within each, newly first, so a brief that just became possible outranks
    *  one that has sat eligible without being shown. */
