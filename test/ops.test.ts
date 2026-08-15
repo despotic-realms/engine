@@ -39,32 +39,32 @@ describe('validateOp', () => {
 describe('applyOp', () => {
   it('decree_tax sets the rate and chronicles it', () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'decree_tax', placeId: 'place:thornfield', rateBp: 1500 }), 3, em, ['t3.dec']);
+    const g = applyOp(g0, ok({ kind: 'decree_tax', placeId: 'place:thornfield', rateBp: 1500 }), 3, em, 'seat:throne', ['t3.dec']);
     expect(propInt(getNode(g, 'place:thornfield').props, 'taxRateBp')).toBe(1500);
     expect(em.all()[0]?.type).toBe('op.decree_tax');
     expect(em.all()[0]?.parents).toEqual(['t3.dec']);
   });
   it('release_grain moves granary to dole', () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'release_grain', placeId: 'place:thornfield', amount: '20' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'release_grain', placeId: 'place:thornfield', amount: '20' }), 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'place:thornfield').props, 'granary')).toBe(fx('230'));
     expect(propFx(getNode(g, 'place:thornfield').props, 'dole')).toBe(fx('20'));
   });
   it('stockpile_grain buys grain at GRAIN_PRICE', () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }), 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('280')); // 300 - 40*0.5
     expect(propFx(getNode(g, 'place:thornfield').props, 'granary')).toBe(fx('290'));
   });
   it('appoint replaces the office holder', () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'appoint', charId: 'char:maud', officeId: 'office:steward' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'appoint', charId: 'char:maud', officeId: 'office:steward' }), 3, em, 'seat:throne');
     expect(findEdge(g, 'appointment', 'char:maud', 'office:steward')).toBeDefined();
     expect(findEdge(g, 'appointment', 'char:osric', 'office:steward')).toBeUndefined();
   });
   it('audit exposes the skimming steward and costs AUDIT_COST', () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'audit', officeId: 'office:steward' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'audit', officeId: 'office:steward' }), 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('280')); // 300 - 20
     const interest = findEdge(g, 'interest', 'char:osric', 'inst:crown');
     expect(interest?.props['exposed']).toBe(true);
@@ -73,13 +73,13 @@ describe('applyOp', () => {
   });
   it('grant raises loyalty by 2.5bp per treasury unit', () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'grant', charId: 'char:osric', amount: '100' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'grant', charId: 'char:osric', amount: '100' }), 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('200'));
     expect(findEdge(g, 'loyalty', 'char:osric', 'char:ruler')?.props['bp']).toBe(4450); // 4200 + 250
   });
   it('invest plants a project node carrying its cause event id', () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '80' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '80' }), 3, em, 'seat:throne');
     const proj = getNode(g, 'proj:irrigation:place:thornfield');
     expect(propInt(proj.props, 'maturesAt')).toBe(11); // 3 + 8
     expect(proj.props['causeEventId']).toBe('t3.0');
@@ -115,7 +115,7 @@ describe('validateOp resource/referential checks (scoped per-arm reads)', () => 
   });
   it('rejects invest into a (place, project) already underway', () => {
     const em = makeEmitter(3);
-    const g1 = applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '80' }), 3, em);
+    const g1 = applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '80' }), 3, em, 'seat:throne');
     const r = validateOp(g1, { kind: 'invest', placeId: 'place:thornfield', project: 'irrigation', amount: '10' });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe('that project is already underway');
@@ -140,7 +140,7 @@ describe('applyOp delta-equivalence (spec D14)', () => {
 
   it.each(cases)('%s: event.deltas replay to the same graph applyOp produced', (_name, op) => {
     const em = makeEmitter(3);
-    const post = applyOp(g0, ok(op), 3, em);
+    const post = applyOp(g0, ok(op), 3, em, 'seat:throne');
     const ev = em.all()[0]!;
     expect(ev.deltas.length).toBeGreaterThan(0);
     const replayed = applyDeltas(g0, ev.deltas);
@@ -149,7 +149,7 @@ describe('applyOp delta-equivalence (spec D14)', () => {
 
   it("invest stamps the project node's causeEventId with the id emit actually mints", () => {
     const em = makeEmitter(3);
-    applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'roads', amount: '50' }), 3, em);
+    applyOp(g0, ok({ kind: 'invest', placeId: 'place:thornfield', project: 'roads', amount: '50' }), 3, em, 'seat:throne');
     const ev = em.all()[0]!;
     const replayed = applyDeltas(g0, ev.deltas);
     expect(getNode(replayed, 'proj:roads:place:thornfield').props['causeEventId']).toBe(ev.id);
@@ -194,7 +194,7 @@ describe('tier-2 op pack: apply', () => {
     const em = makeEmitter(3);
     const r = validateOp(g0, { kind: 'imprison', charId: 'char:osric' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(getNode(g, 'char:osric').props['imprisoned']).toBe(true);
     expect(findEdge(g, 'appointment', 'char:osric', 'office:steward')).toBeUndefined();
     expect(findEdge(g, 'grudge', 'char:osric', 'char:ruler')?.props['bp']).toBe(2500);
@@ -204,11 +204,11 @@ describe('tier-2 op pack: apply', () => {
     const em0 = makeEmitter(3);
     const r0 = validateOp(g0, { kind: 'imprison', charId: 'char:osric' });
     if (!r0.ok) throw new Error(r0.error);
-    g0 = applyOp(g0, r0.op, 3, em0);
+    g0 = applyOp(g0, r0.op, 3, em0, 'seat:throne');
     const em = makeEmitter(4);
     const r = validateOp(g0, { kind: 'pardon', charId: 'char:osric' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 4, em);
+    const g = applyOp(g0, r.op, 4, em, 'seat:throne');
     expect(getNode(g, 'char:osric').props['imprisoned']).toBe(false);
     expect(findEdge(g, 'grudge', 'char:osric', 'char:ruler')?.props['bp']).toBe(1000); // 2500 - 1500
     expect(findEdge(g, 'loyalty', 'char:osric', 'char:ruler')?.props['bp']).toBe(4700); // 4200 + 500
@@ -218,7 +218,7 @@ describe('tier-2 op pack: apply', () => {
     const em = makeEmitter(3);
     const r = validateOp(g0, { kind: 'raise_levy', placeId: 'place:thornfield', size: '50' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'place:thornfield').props, 'levy')).toBe(fx('50'));
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('260')); // 300 - 50*0.8
   });
@@ -227,11 +227,11 @@ describe('tier-2 op pack: apply', () => {
     const em = makeEmitter(3);
     const rc = validateOp(g0, { kind: 'send_envoy', charId: 'char:maud', tone: 'conciliatory' });
     if (!rc.ok) throw new Error(rc.error);
-    const gc = applyOp(g0, rc.op, 3, em);
+    const gc = applyOp(g0, rc.op, 3, em, 'seat:throne');
     expect(findEdge(gc, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(5700); // 6500 - 800
     const rt = validateOp(g0, { kind: 'send_envoy', charId: 'char:vane', tone: 'threatening' });
     if (!rt.ok) throw new Error(rt.error);
-    const gt = applyOp(g0, rt.op, 3, em);
+    const gt = applyOp(g0, rt.op, 3, em, 'seat:throne');
     expect(findEdge(gt, 'grudge', 'char:vane', 'char:ruler')?.props['bp']).toBe(600); // created
   });
   it('seize transfers wealth, kindles grudge, costs legitimacy', () => {
@@ -239,7 +239,7 @@ describe('tier-2 op pack: apply', () => {
     const em = makeEmitter(3);
     const r = validateOp(g0, { kind: 'seize', charId: 'char:maud', amount: '100' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'char:maud').props, 'wealth')).toBe(fx('300'));
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('400'));
     expect(findEdge(g, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(8500); // 6500 + 2000
@@ -250,7 +250,7 @@ describe('tier-2 op pack: apply', () => {
     const em = makeEmitter(3);
     const r = validateOp(g0, { kind: 'hold_festival', placeId: 'place:thornfield', amount: '40' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(fx('260'));
     expect(propFx(getNode(g, 'place:thornfield').props, 'unrest')).toBe(fx('35')); // 40 - 40/8
   });
@@ -268,7 +268,7 @@ describe('tier-2 op pack: delta-equivalence (spec D14)', () => {
     const em = makeEmitter(3);
     const r = validateOp(g, { kind: 'imprison', charId: 'char:osric' });
     if (!r.ok) throw new Error(r.error);
-    return applyOp(g, r.op, 3, em);
+    return applyOp(g, r.op, 3, em, 'seat:throne');
   })();
   const preLevied = setNodeProp(tier2ish(), 'place:thornfield', 'levy', fx('50'));
 
@@ -286,7 +286,7 @@ describe('tier-2 op pack: delta-equivalence (spec D14)', () => {
     const em = makeEmitter(3);
     const r = validateOp(pre, op);
     if (!r.ok) throw new Error(r.error);
-    const post = applyOp(pre, r.op, 3, em);
+    const post = applyOp(pre, r.op, 3, em, 'seat:throne');
     const ev = em.all()[0]!;
     expect(ev.deltas.length).toBeGreaterThan(0);
     const replayed = applyDeltas(pre, ev.deltas);
@@ -309,7 +309,7 @@ describe('tier-2 op pack: both sides of every branch (regression pins)', () => {
     const em = makeEmitter(3);
     const r = validateOp(g0, { kind: 'imprison', charId: 'char:maud' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(findEdge(g, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(9000); // 6500 + 2500, edge.set
   });
   it('pardon creates a loyalty edge from scratch when none exists (clampBp(5500))', () => {
@@ -317,11 +317,11 @@ describe('tier-2 op pack: both sides of every branch (regression pins)', () => {
     const em0 = makeEmitter(3);
     const r0 = validateOp(g0, { kind: 'imprison', charId: 'char:maud' });
     if (!r0.ok) throw new Error(r0.error);
-    g0 = applyOp(g0, r0.op, 3, em0);
+    g0 = applyOp(g0, r0.op, 3, em0, 'seat:throne');
     const em = makeEmitter(4);
     const r = validateOp(g0, { kind: 'pardon', charId: 'char:maud' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 4, em);
+    const g = applyOp(g0, r.op, 4, em, 'seat:throne');
     expect(findEdge(g, 'loyalty', 'char:maud', 'char:ruler')?.props['bp']).toBe(5500); // created
     expect(findEdge(g, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(7500); // 9000 - 1500, bonus check
   });
@@ -331,12 +331,12 @@ describe('tier-2 op pack: both sides of every branch (regression pins)', () => {
     // osric: no grudge to ruler, but a pre-existing loyalty edge (4200) -> update
     const ro = validateOp(g0, { kind: 'send_envoy', charId: 'char:osric', tone: 'conciliatory' });
     if (!ro.ok) throw new Error(ro.error);
-    const go = applyOp(g0, ro.op, 3, em);
+    const go = applyOp(g0, ro.op, 3, em, 'seat:throne');
     expect(findEdge(go, 'loyalty', 'char:osric', 'char:ruler')?.props['bp']).toBe(4500); // 4200 + 300
     // vane: no grudge, no loyalty at all -> created at 5300
     const rv = validateOp(g0, { kind: 'send_envoy', charId: 'char:vane', tone: 'conciliatory' });
     if (!rv.ok) throw new Error(rv.error);
-    const gv = applyOp(g0, rv.op, 3, em);
+    const gv = applyOp(g0, rv.op, 3, em, 'seat:throne');
     expect(findEdge(gv, 'loyalty', 'char:vane', 'char:ruler')?.props['bp']).toBe(5300);
   });
   it('send_envoy threatening touches both an existing grudge (+600) and an existing loyalty (-300) from one fixture', () => {
@@ -345,31 +345,41 @@ describe('tier-2 op pack: both sides of every branch (regression pins)', () => {
     const em = makeEmitter(3);
     const r = validateOp(g0, { kind: 'send_envoy', charId: 'char:osric', tone: 'threatening' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     expect(findEdge(g, 'grudge', 'char:osric', 'char:ruler')?.props['bp']).toBe(1600); // 1000 + 600, edge.set
     expect(findEdge(g, 'loyalty', 'char:osric', 'char:ruler')?.props['bp']).toBe(3900); // 4200 - 300
   });
-  it("send_envoy 'firm' is the zero-delta contract: validates ok, applies to a bit-identical graph", () => {
-    const g0 = tier2ish(); // maud carries pre-existing edges -- firm must still touch none of them
+  // Causality §2 (T3): 'firm' used to be a documented zero-delta, byte-
+  // identical contract (no state change at all). It no longer is -- every
+  // send_envoy tone, firm included, now stamps its own fingerprint
+  // (envoy-firm) on the target -- so this pins the NEW contract instead:
+  // firm still moves no RELATIONSHIP edge (maud's pre-existing grudge is
+  // untouched, no loyalty edge appears), but it is no longer a no-op.
+  it("send_envoy 'firm' moves no relationship edge, but now carries exactly its fingerprint stamp (no longer zero-delta)", () => {
+    const g0 = tier2ish(); // maud carries a pre-existing grudge edge -- firm must still touch it not at all
     expect(validateOp(g0, { kind: 'send_envoy', charId: 'char:maud', tone: 'firm' }).ok).toBe(true);
     const em = makeEmitter(3);
     const r = validateOp(g0, { kind: 'send_envoy', charId: 'char:maud', tone: 'firm' });
     if (!r.ok) throw new Error(r.error);
-    const g = applyOp(g0, r.op, 3, em);
+    const g = applyOp(g0, r.op, 3, em, 'seat:throne');
     const ev = em.all()[0]!;
-    expect(ev.deltas.length).toBe(0);
-    expect(hashValue(g)).toBe(hashValue(g0));
+    expect(ev.deltas).toHaveLength(2); // exactly the fingerprint stamp: recent:envoy-firm + recent:envoy-firm:at
+    expect(hashValue(g)).not.toBe(hashValue(g0));
+    expect(findEdge(g, 'grudge', 'char:maud', 'char:ruler')?.props['bp']).toBe(6500); // untouched
+    expect(findEdge(g, 'loyalty', 'char:maud', 'char:ruler')).toBeUndefined(); // no loyalty edge created
+    expect(getNode(g, 'char:maud').props['recent:envoy-firm']).toBe('seat:throne');
+    expect(getNode(g, 'char:maud').props['recent:envoy-firm:at']).toBe(3);
   });
   it("disband_levy zeroes the levy prop exactly (fx('0')) after a raise", () => {
     const g0 = tier2ish();
     const em1 = makeEmitter(3);
     const r1 = validateOp(g0, { kind: 'raise_levy', placeId: 'place:thornfield', size: '50' });
     if (!r1.ok) throw new Error(r1.error);
-    const g1 = applyOp(g0, r1.op, 3, em1);
+    const g1 = applyOp(g0, r1.op, 3, em1, 'seat:throne');
     const em2 = makeEmitter(4);
     const r2 = validateOp(g1, { kind: 'disband_levy', placeId: 'place:thornfield' });
     if (!r2.ok) throw new Error(r2.error);
-    const g2 = applyOp(g1, r2.op, 4, em2);
+    const g2 = applyOp(g1, r2.op, 4, em2, 'seat:throne');
     expect(propFx(getNode(g2, 'place:thornfield').props, 'levy')).toBe(fx('0'));
   });
   it('hold_festival rejects when treasury cannot afford it', () => {
@@ -409,17 +419,17 @@ describe('record_stance: validate', () => {
 describe('record_stance: apply', () => {
   it("sets stance:<id> on the crown and chronicles it", () => {
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em, 'seat:throne');
     expect(propStr(getNode(g, 'inst:crown').props, 'stance:granary-doctrine')).toBe('for');
     expect(em.all()[0]?.type).toBe('op.record_stance');
     expect(em.all()[0]?.data['stanceId']).toBe('granary-doctrine');
   });
   it('re-recording the same stanceId overwrites -- the reversal is the chronicle-visible probe', () => {
     const em1 = makeEmitter(3);
-    const g1 = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em1);
+    const g1 = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em1, 'seat:throne');
     expect(propStr(getNode(g1, 'inst:crown').props, 'stance:granary-doctrine')).toBe('for');
     const em2 = makeEmitter(4);
-    const g2 = applyOp(g1, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'against' }), 4, em2);
+    const g2 = applyOp(g1, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'against' }), 4, em2, 'seat:throne');
     expect(propStr(getNode(g2, 'inst:crown').props, 'stance:granary-doctrine')).toBe('against');
   });
 });
@@ -431,7 +441,7 @@ describe('record_stance: storylet gate mechanism (matchPattern integration)', ()
     };
     expect(matchPattern(g0, pattern)).toEqual([]); // no stance recorded yet
     const em = makeEmitter(3);
-    const g = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em);
+    const g = applyOp(g0, ok({ kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }), 3, em, 'seat:throne');
     expect(matchPattern(g, pattern)).toEqual([{ crown: 'inst:crown' }]);
   });
 });

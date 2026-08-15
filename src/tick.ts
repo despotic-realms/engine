@@ -7,6 +7,7 @@
 import { hashValue } from './canon.js';
 import type { CharacterArc } from './arcs.js';
 import { advanceCharacterArcs } from './arcs.js';
+import { attribute } from './attribution.js';
 import type { ChronicleEvent, Emitter, GraphDelta } from './events.js';
 import { applyDeltas, makeEmitter } from './events.js';
 import type { Fortune } from './fortune.js';
@@ -23,13 +24,13 @@ import type { Observation } from './observe.js';
 import { observeExecutions, vetObservation } from './observe.js';
 import type { ReportedLedger, Seat } from './report.js';
 import { compileReport } from './report.js';
-import type { ExaminerCalendar } from './scheduler.js';
+import type { Booking, ExaminerCalendar } from './scheduler.js';
 import { advanceArcs, examiner } from './scheduler.js';
 import type { Band, WantKey } from './spine.js';
 import { WANT_FULFILL, currentWant } from './spine.js';
-import type { Deck, Storylet } from './storylet.js';
-import { bindOps, eligibleStorylets, renderTpl } from './storylet.js';
-import { economyStep, socialStep } from './systems.js';
+import type { Deck, Storylet, StoryletOption } from './storylet.js';
+import { bindOps, eligibleStorylets, possibleStorylets, renderTpl } from './storylet.js';
+import { economyStep, fingerprintDecayStep, socialStep } from './systems.js';
 
 export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number; mediation?: MediationConfig }
 
@@ -74,6 +75,33 @@ export interface ReignState {
   presented: Record<string, number>;   // instanceKey -> times presented as a brief (D13 novelty casting)
   pending: PendingBrief[];
   arcs: Record<string, CharacterArc>;  // T8 (spec §5): key = `${kind}:${charId}` -- restless/scheme arc bookkeeping (stage, sinceTick)
+  /** Causality §1 (whole-wave final-review fix): sorted instance keys of
+   *  THIS state's tick's PATTERN-POSSIBILITY BRIEF set (letters excluded)
+   *  -- storylet.ts's possibleStorylets(), NOT eligibleStorylets': every
+   *  brief instance whose pattern binds against the graph this tick,
+   *  UNFILTERED by cooldowns or firedOnce. Deliberately NOT "what
+   *  examiner.select's pool sees" (that pool is the cooldown/firedOnce-
+   *  filtered DEALT set, a strict subset) -- a brief instance mid-cooldown
+   *  still counts as possible here, so its cooldown expiring later never
+   *  reads as "newly eligible" (its pattern never stopped binding, it was
+   *  simply undealable for a tick or two). Threads through resolveTick
+   *  like arcs/presented/cooldowns: each call reads it as the prior
+   *  snapshot to diff against the freshly computed possibility set (the
+   *  difference is `newlyEligible`), then overwrites it with that fresh
+   *  set for the next call to read. Empty at the start of a reign, so tick
+   *  1 finds every possible brief newly eligible. */
+  eligibleLastTick: string[];
+  /** Causality §3 (T4): booked follow-ups -- StoryletOption.books applied at
+   *  choice-application time (attended, defaulted, and neglected paths all
+   *  record; mediation is an ops-application detail underneath the SAME
+   *  choice and never gates recording) appends here. Threads through
+   *  resolveTick like arcs/eligibleLastTick: each call starts from the
+   *  prior snapshot, appends this tick's newly-recorded bookings, then
+   *  removes whatever examiner.select dealt or lapsed this tick before
+   *  returning. Empty at the start of a reign. Order-stable: select()
+   *  processes this array in a fixed sort of its own (storyletId, bookedAt,
+   *  seatId), never insertion order alone. */
+  bookings: Booking[];
 }
 
 export interface DecisionChoice {
@@ -93,6 +121,13 @@ export interface Brief {
   body: string;
   options: Array<{ id: string; label: string }>;
   directiveAllowed: true;
+  /** Causality §1 (T2): sorted ids of THIS tick's player-descended events
+   *  whose writes made this brief newly eligible -- present only on
+   *  player-attributed deals (attribution.ts's attribute()), absent (never
+   *  `undefined`-but-present -- see the construction site) on every other
+   *  brief. Packet-only, informational: surfaces render a "because of your
+   *  order" label off it; nothing in the core reads it back. */
+  becauseOf?: string[];
 }
 
 export interface Letter { from: string; title: string; body: string; storyletId: string }
@@ -107,7 +142,7 @@ export interface TickPacket {
 }
 
 export function initialState(season: SeasonConfig): ReignState {
-  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {} };
+  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {}, eligibleLastTick: [], bookings: [] };
 }
 
 const CHOICE_KEYS = new Set(['briefId', 'optionId', 'ops', 'via', 'compileRef']);
@@ -185,6 +220,18 @@ function findStorylet(season: SeasonConfig, id: string): Storylet {
   throw new Error(`no storylet '${id}' in season decks`);
 }
 
+// Causality §3 (T4): StoryletOption.books -> a ReignState.bookings entry.
+// byTick = the tick this option was chosen/defaulted (resolveTick's own
+// `tick`, i.e. state.tick -- NOT nextTick) PLUS withinTicks: the earliest a
+// booking can possibly deal is next tick (this same resolveTick call's own
+// step 9 casts for state.tick + 1), so withinTicks counts casting
+// opportunities from there -- withinTicks 1 means "must deal at next tick
+// or never," mirroring how fingerprints (ops.ts's stampDeed) stamp `at` as
+// the current tick and decay off `tick - at`.
+function recordBooking(books: NonNullable<StoryletOption['books']>, tick: number, seatId: string): Booking {
+  return { storyletId: books.storyletId, seatId, byTick: tick + books.withinTicks, bookedAt: tick };
+}
+
 // Rolling wants (spec §2, T7): after an op's own deltas land, every
 // character with a wantChain gets one chance to advance -- sorted by node
 // id so two characters satisfied by the same op (a festival pleasing two
@@ -258,12 +305,13 @@ function applyOpWithWants(
   tick: number,
   fortune: Fortune,
   em: Emitter,
+  seatId: string,
   parents: string[],
 ): WorldGraph {
   const before = em.all().length;
   let g2 = tierCfg.mediation
-    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, parents)
-    : applyOp(g, op, tick, em, parents);
+    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, seatId, parents)
+    : applyOp(g, op, tick, em, seatId, parents);
   const landedEvent = em.all().slice(before).find((e) => e.type === `op.${op.kind}`);
   if (landedEvent) g2 = advanceWants(g2, landedOp(op, landedEvent.data), tick, em, landedEvent.id);
   return g2;
@@ -281,6 +329,7 @@ export function resolveTick(
   const em = makeEmitter(tick);
   let g = state.graph;
   let arcs = state.arcs;
+  let bookings = state.bookings;
   const tierCfg = season.tiers[state.tier];
   if (!tierCfg) throw new Error(`no tier config for tier ${state.tier}`);
 
@@ -298,13 +347,26 @@ export function resolveTick(
   // 3. Apply attended ops in the agent's priority order.
   for (const choice of attended) {
     const pending = state.pending.find((p) => p.briefId === choice.briefId)!;
-    const ops = choice.optionId !== undefined
-      ? bindOps(findStorylet(season, pending.storyletId).options.find((o) => o.id === choice.optionId)!.ops, pending.binding)
-      : choice.ops ?? [];
+    const chosenOption = choice.optionId !== undefined
+      ? findStorylet(season, pending.storyletId).options.find((o) => o.id === choice.optionId)
+      : undefined;
+    const ops = chosenOption ? bindOps(chosenOption.ops, pending.binding) : choice.ops ?? [];
     for (const op of ops) {
       const r = validateOp(g, op);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
-      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, [decisionEvents.get(choice.briefId)!]);
+      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!]);
+    }
+    // Causality §3 (T4): booking is a property of the CHOSEN OPTION, not of
+    // any individual op's success -- records once per attended choice whose
+    // option carries `books`, regardless of whether the ops above landed or
+    // were rejected (an option can also book with no ops at all). A raw
+    // directive choice (choice.optionId === undefined, chosenOption
+    // undefined) never books: `books` lives on a STORYLET OPTION, and a
+    // directive bypasses options entirely.
+    if (chosenOption?.books) {
+      const booking = recordBooking(chosenOption.books, tick, decisions.seatId);
+      bookings = [...bookings, booking];
+      em.emit('scene.booked', { parents: [decisionEvents.get(choice.briefId)!], data: { storyletId: booking.storyletId, byTick: booking.byTick } });
     }
   }
 
@@ -322,8 +384,18 @@ export function resolveTick(
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
       const r = validateOp(g, op);
       if (r.ok) {
-        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, [ev.id]);
+        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id]);
       } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
+    }
+    // Causality §3 (T4): the default path books too (plan test (e)) --
+    // covers BOTH brief.defaulted (never decided) and brief.neglected
+    // (decided but over the attention cut) since they share this one loop;
+    // parent is whichever of those two events this pending brief actually
+    // got emitted above.
+    if (defaultOption?.books) {
+      const booking = recordBooking(defaultOption.books, tick, decisions.seatId);
+      bookings = [...bookings, booking];
+      em.emit('scene.booked', { parents: [ev.id], data: { storyletId: booking.storyletId, byTick: booking.byTick } });
     }
   }
 
@@ -388,6 +460,13 @@ export function resolveTick(
   // 5-7. Systems.
   g = economyStep(g, tick, fortune, em);
   g = socialStep(g, tick, em);
+  // Causality §2: deed fingerprint decay, adjacent to socialStep (systems.ts)
+  // -- placed here for the same "no dependency either way" reason advanceArcs
+  // and character arcs sit next to each other below: fingerprint props are
+  // disjoint from everything economyStep/socialStep/advanceArcs touch, so
+  // ordering only affects which of this tick's events sort first, never the
+  // outcome.
+  g = fingerprintDecayStep(g, tick, em);
   g = advanceArcs(g, tick, season.calendar, em);
   // T8 (spec §5): character arcs generalize the famine machinery just
   // above to people -- same tick-driven systems step, same delta-native
@@ -415,10 +494,55 @@ export function resolveTick(
   const firedOnce = { ...state.firedOnce };
   const presented = { ...state.presented };
   const eligible = eligibleStorylets(g, decks, cooldowns, nextTick, firedOnce);
+  // Causality §1 (whole-wave final-review fix): recency casting keys off
+  // the PATTERN-POSSIBILITY set (possibleStorylets, storylet.ts) instead
+  // of the cooldown/firedOnce-FILTERED `eligible` pool just above --
+  // `eligible` itself is untouched by this fix and remains exactly the
+  // DEALT pool examiner.select draws from below. Why the split: a brief
+  // dealt at tick T with cooldownTicks C leaves `eligible` until T+C, then
+  // re-enters it -- but its PATTERN never stopped binding in between, so
+  // diffing against the filtered pool (the pre-fix behavior) misread every
+  // cooldown expiry as "just became possible," handing the recycling brief
+  // a recency boost over standing briefs regardless of how many times it
+  // had already been shown. Diffing against the unfiltered possibility set
+  // fixes this: a cooldown-expired brief was already possible last tick
+  // (present in the snapshot below), so it re-enters `eligible` as
+  // STANDING, competing on presented-count novelty like everything else --
+  // while a genuine world-change unlock (a pattern that could NOT bind
+  // last tick, cooldown aside) still lands newly, exactly as before.
+  const possible = possibleStorylets(g, decks);
+  const priorPossible = new Set(state.eligibleLastTick);
+  const possibleBriefKeys = possible.filter((e) => e.storylet.kind === 'brief').map((e) => e.instanceKey);
+  const newlyEligible = new Set(possibleBriefKeys.filter((k) => !priorPossible.has(k)));
+  const eligibleLastTick = [...new Set(possibleBriefKeys)].sort();
+  // Causality §1 (T2): computed attribution over the newly-eligible brief
+  // entries only (attribute() is never asked about standing ones -- a
+  // standing instanceKey can never be a becauseOf map key). `em.all()` here
+  // is everything chronicled THIS tick through step 8 (decisions, ops,
+  // observations, systems, ladder) -- nothing from step 9 itself has been
+  // emitted yet, so this can't self-referentially attribute a brief to its
+  // own presentation. `decisionEvents.values()` is every decision.recorded
+  // id minted THIS tick (step 1-2, one per submitted choice, attended or
+  // not) -- the ancestry walk's root set.
+  const newlyEligibleEntries = eligible.filter((e) => e.storylet.kind === 'brief' && newlyEligible.has(e.instanceKey));
+  const becauseOf = attribute(g, newlyEligibleEntries, em.all(), new Set(decisionEvents.values()));
   // presented (pre-increment below) is the N-1 snapshot: this tick's own
   // presentations don't count toward its own selection.
-  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented });
+  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible, becauseOf, bookings });
   for (const id of sel.skippedProbes) em.emit('probe.skipped', { data: { storyletId: id, tick: nextTick } });
+  // Causality §3 (T4): a dealt booking needs no event of its own -- the
+  // forced entry rides the ordinary brief.presented emission below (sel.
+  // chosen doesn't distinguish HOW an entry was chosen), so this only has
+  // work to do for lapses. deltas: [] (the emitter default, omitted below)
+  // -- a booking's existence lives in ReignState.bookings alone, never the
+  // WorldGraph, so there is nothing to delta (state-field lifecycle, the
+  // same "informational only" shape arcs.ts's arc.poach.bid/
+  // arc.scheme.telegraph already use). No `parents` either, matching how
+  // EVERY arcs.ts lifecycle event (arc.retained, arc.departed, arc.restless,
+  // ...) omits it: a lapse is a scheduler-side systemic determination made
+  // at select() time, not descended from any one of this tick's decisions.
+  for (const b of sel.lapsedBookings) em.emit('scene.booking.lapsed', { data: { storyletId: b.storyletId } });
+  bookings = bookings.filter((b) => !sel.dealtBookings.includes(b) && !sel.lapsedBookings.includes(b));
 
   const pending: PendingBrief[] = [];
   const briefs: Brief[] = [];
@@ -429,12 +553,18 @@ export function resolveTick(
     presented[entry.instanceKey] = (presented[entry.instanceKey] ?? 0) + 1;
     if (entry.storylet.once) firedOnce[entry.instanceKey] = true;
     pending.push({ briefId, storyletId: entry.storylet.id, binding: entry.binding, defaultOptionId: entry.storylet.defaultOptionId, presentedEventId: ev.id });
+    // becauseOf is spread in conditionally (never a present-but-undefined
+    // key): canonJson (canon.ts) throws on `typeof undefined`, and a Brief
+    // can end up inside a hashed/canonicalized value down the line -- an
+    // absent key is also just the correct reading of the optional field.
+    const becauseOfIds = becauseOf.get(entry.instanceKey);
     briefs.push({
       briefId, storyletId: entry.storylet.id,
       title: renderTpl(entry.storylet.title, g, entry.binding),
       body: renderTpl(entry.storylet.body, g, entry.binding),
       options: entry.storylet.options.map((o) => ({ id: o.id, label: renderTpl(o.label, g, entry.binding) })),
       directiveAllowed: true,
+      ...(becauseOfIds !== undefined ? { becauseOf: becauseOfIds } : {}),
     });
   });
 
@@ -456,7 +586,7 @@ export function resolveTick(
   });
 
   return {
-    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs },
+    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs, eligibleLastTick, bookings },
     events: em.all(),
     packet: { tick: nextTick, tier, attentionSlots: nextCfg.attentionSlots, briefs, reports, correspondence },
   };

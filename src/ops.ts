@@ -316,10 +316,82 @@ function clampBp(bp: number): number {
   return bp > 10000 ? 10000 : bp < 0 ? 0 : bp;
 }
 
-export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parents: string[] = []): WorldGraph {
+// Causality §2: deed fingerprints. Every consequential op stamps a
+// short-lived, ACTOR-VALUED marker on its target -- `recent:<deed>` = the
+// acting seat id, `recent:<deed>:at` = tick -- so content can gate reaction
+// scenes on actual recent deeds instead of durable stances alone.
+// Multiplayer-proofed day one: the stamped VALUE is a SEAT id (never a
+// character id), so a future multi-seat world can already tell whose deed
+// this was. Closed set, exact strings -- content gates read these verbatim
+// (causality plan Global Constraints); DEED_NAMES is the single source of
+// truth both this table and systems.ts's decay pass read from.
+export const DEED_NAMES = [
+  'granted', 'seized', 'envoy-warm', 'envoy-firm', 'envoy-hard', 'audited',
+  'appointed', 'imprisoned', 'pardoned', 'vetted',
+  'festival', 'invested', 'grain-released', 'grain-bought', 'levy-raised', 'taxed',
+] as const;
+export type Deed = (typeof DEED_NAMES)[number];
+
+// A fingerprint reads as absent (decay bookkeeping, systems.ts) once
+// `tick - at > FINGERPRINT_TICKS`.
+export const FINGERPRINT_TICKS = 3;
+
+// op kind -> deed name, for every deed-producing op EXCEPT send_envoy, whose
+// deed depends on its own `tone` param rather than a static 1:1 mapping (see
+// ENVOY_DEED below) -- the Exclude keeps a stray 'send_envoy' entry here a
+// compile error, not a silent dead branch. Every op kind absent from BOTH
+// tables never stamps: record_stance/obscure_records by spec exclusion
+// (stances are already the durable marker); disband_levy was simply never
+// added to the v1 deed vocabulary.
+export const DEEDS: Partial<Record<Exclude<Op['kind'], 'send_envoy'>, Deed>> = {
+  grant: 'granted',
+  seize: 'seized',
+  audit: 'audited',
+  appoint: 'appointed',
+  imprison: 'imprisoned',
+  pardon: 'pardoned',
+  vet: 'vetted',
+  hold_festival: 'festival',
+  invest: 'invested',
+  release_grain: 'grain-released',
+  stockpile_grain: 'grain-bought',
+  raise_levy: 'levy-raised',
+  decree_tax: 'taxed',
+};
+
+export const ENVOY_DEED: Record<'conciliatory' | 'firm' | 'threatening', Deed> = {
+  conciliatory: 'envoy-warm',
+  firm: 'envoy-firm',
+  threatening: 'envoy-hard',
+};
+
+/** The two deltas a deed-producing arm folds into its OWN delta bundle
+ *  (causality §2, D14): recent:<deed> = the deciding seat (actor-valued),
+ *  recent:<deed>:at = tick. Always both together, always appended to the
+ *  same deltas[] the arm hands to applyDeltas/em.emit -- so replaying the
+ *  op's own event alone reproduces the stamp exactly like every other
+ *  mutation in this file. */
+function stampDeed(targetId: string, deed: Deed, seatId: string, tick: number): GraphDelta[] {
+  return [
+    { op: 'node.set', id: targetId, key: `recent:${deed}`, value: seatId },
+    { op: 'node.set', id: targetId, key: `recent:${deed}:at`, value: tick },
+  ];
+}
+
+// seatId: the DECIDING seat (causality §2) -- decisions carry seatId
+// (tick.ts's TickDecisions), threaded here through applyOpWithWants and
+// applyMediatedOp so every deed-producing arm below can stamp its target
+// with WHO decided this, never with the mediated executor character (see
+// mediate.ts's applyMediatedOp, which forwards its own received seatId
+// unchanged). No default: a fingerprint's actor must always be a real,
+// explicit value -- see this file's report for the full call-site wiring.
+export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, seatId: string, parents: string[] = []): WorldGraph {
   switch (op.kind) {
     case 'decree_tax': {
-      const deltas: GraphDelta[] = [{ op: 'node.set', id: op.placeId, key: 'taxRateBp', value: op.rateBp }];
+      const deltas: GraphDelta[] = [
+        { op: 'node.set', id: op.placeId, key: 'taxRateBp', value: op.rateBp },
+        ...stampDeed(op.placeId, 'taxed', seatId, tick),
+      ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.decree_tax', { parents, data: { ...op }, deltas });
       return g2;
@@ -330,6 +402,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const deltas: GraphDelta[] = [
         { op: 'node.set', id: op.placeId, key: 'granary', value: propFx(p, 'granary') - amount },
         { op: 'node.set', id: op.placeId, key: 'dole', value: propFx(p, 'dole') + amount },
+        ...stampDeed(op.placeId, 'grain-released', seatId, tick),
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.release_grain', { parents, data: { ...op }, deltas });
@@ -340,6 +413,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const deltas: GraphDelta[] = [
         debitTreasury(g, mulFx(amount, ECON.GRAIN_PRICE)),
         { op: 'node.set', id: op.placeId, key: 'granary', value: propFx(getNode(g, op.placeId).props, 'granary') + amount },
+        ...stampDeed(op.placeId, 'grain-bought', seatId, tick),
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.stockpile_grain', { parents, data: { ...op }, deltas });
@@ -356,6 +430,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
           type: 'appointment', src: op.charId, dst: op.officeId, props: { since: tick },
         },
       });
+      deltas.push(...stampDeed(op.charId, 'appointed', seatId, tick));
       const g2 = applyDeltas(g, deltas);
       em.emit('op.appoint', { parents, data: { ...op }, deltas });
       return g2;
@@ -372,6 +447,9 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
         skimmed = propFx(interest.props, 'skimmed');
         deltas.push({ op: 'edge.set', id: interest.id, key: 'exposed', value: true });
       }
+      // 'audited' is the fact of the audit, not its outcome -- stamps the
+      // holder unconditionally, whether or not skimming was found above.
+      deltas.push(...stampDeed(holder.src, 'audited', seatId, tick));
       const g2 = applyDeltas(g, deltas);
       em.emit('op.audit', { parents, data: { ...op, found, skimmed: fxToString(skimmed), holder: holder.src }, deltas });
       return g2;
@@ -404,6 +482,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
           edge: { id: eid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
         });
       }
+      deltas.push(...stampDeed(op.charId, 'granted', seatId, tick));
       const g2 = applyDeltas(g, deltas);
       em.emit('op.grant', { parents, data: { ...op, bpDelta }, deltas });
       return g2;
@@ -428,6 +507,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
             },
           },
         },
+        ...stampDeed(op.placeId, 'invested', seatId, tick),
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.invest', { parents, data: { ...op }, deltas });
@@ -452,6 +532,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
           edge: { id: gid, type: 'grudge', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
         });
       }
+      deltas.push(...stampDeed(op.charId, 'imprisoned', seatId, tick));
       const g2 = applyDeltas(g, deltas);
       em.emit('op.imprison', { parents, data: { ...op }, deltas });
       return g2;
@@ -482,6 +563,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
           edge: { id: lid, type: 'loyalty', src: op.charId, dst: rulerId, props: { bp: newBp, log: [{ tick, deltaBp: newBp, cause: eventId }] } },
         });
       }
+      deltas.push(...stampDeed(op.charId, 'pardoned', seatId, tick));
       const g2 = applyDeltas(g, deltas);
       em.emit('op.pardon', { parents, data: { ...op }, deltas });
       return g2;
@@ -491,6 +573,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const deltas: GraphDelta[] = [
         debitTreasury(g, mulFx(size, ECON.LEVY_RAISE_COST)),
         { op: 'node.set', id: op.placeId, key: 'levy', value: propFx(getNode(g, op.placeId).props, 'levy') + size },
+        ...stampDeed(op.placeId, 'levy-raised', seatId, tick),
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.raise_levy', { parents, data: { ...op }, deltas });
@@ -546,7 +629,11 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
           deltas.push({ op: 'edge.set', id: lid, key: 'log', value: appendAllegianceLog(existingLoyalty.props, tick, newBp - curLoyalty, eventId) });
         }
       }
-      // 'firm' changes posture, not state: no deltas, event only.
+      // 'firm' moves no relationship edge -- but every tone still stamps its
+      // own fingerprint (envoy-warm/envoy-firm/envoy-hard, ENVOY_DEED[op.tone]),
+      // so 'firm' is no longer a zero-delta contract: exactly the two stamp
+      // deltas below are its entire effect.
+      deltas.push(...stampDeed(op.charId, ENVOY_DEED[op.tone], seatId, tick));
       const g2 = applyDeltas(g, deltas);
       em.emit('op.send_envoy', { parents, data: { ...op }, deltas });
       return g2;
@@ -575,6 +662,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
         });
       }
       deltas.push({ op: 'node.set', id: 'inst:crown', key: 'legitimacy', value: clampFx(legitimacy - fx('3'), FX_ZERO, fx('100')) });
+      deltas.push(...stampDeed(op.charId, 'seized', seatId, tick));
       const g2 = applyDeltas(g, deltas);
       em.emit('op.seize', { parents, data: { ...op }, deltas });
       return g2;
@@ -585,6 +673,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       const deltas: GraphDelta[] = [
         debitTreasury(g, amount),
         { op: 'node.set', id: op.placeId, key: 'unrest', value: clampFx(unrest - divFx(amount, fx('8')), FX_ZERO, fx('100')) },
+        ...stampDeed(op.placeId, 'festival', seatId, tick),
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.hold_festival', { parents, data: { ...op }, deltas });
@@ -606,7 +695,7 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, parent
       // which applyOp doesn't have (like every op here); it's derived from
       // this landed op.vet event by tick.ts's step 4.5 (see observe.ts's
       // vetObservation), never here.
-      const deltas: GraphDelta[] = [debitTreasury(g, VET_COST)];
+      const deltas: GraphDelta[] = [debitTreasury(g, VET_COST), ...stampDeed(op.charId, 'vetted', seatId, tick)];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.vet', { parents, data: { ...op }, deltas });
       return g2;

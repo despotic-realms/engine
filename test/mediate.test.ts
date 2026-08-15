@@ -29,14 +29,14 @@ describe('mediated execution (spec §3)', () => {
     let g = world(7000);
     // office:marshal never exists in this fixture -- missing office and
     // vacant office resolve identically.
-    const g2 = applyMediatedOp(g, { kind: 'raise_levy', placeId: 'place:ash', size: '10' }, 3, makeFortune('m'), em, MED, []);
+    const g2 = applyMediatedOp(g, { kind: 'raise_levy', placeId: 'place:ash', size: '10' }, 3, makeFortune('m'), em, MED, 'seat:throne', []);
     expect(g2).toBe(g);
     expect(em.all().some((e) => e.type === 'op.rejected')).toBe(true);
   });
 
   it('sound band executes the op verbatim and emits op.executed with the band', () => {
     const em = makeEmitter(4);
-    const g2 = applyMediatedOp(world(9000), { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' }, 4, makeFortune('sound-seed-a'), em, MED, []);
+    const g2 = applyMediatedOp(world(9000), { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' }, 4, makeFortune('sound-seed-a'), em, MED, 'seat:throne', []);
     const ex = em.all().find((e) => e.type === 'op.executed');
     expect(ex).toBeDefined();
     expect(['sound', 'outstanding']).toContain((ex!.data as { band: string }).band);
@@ -48,7 +48,7 @@ describe('mediated execution (spec §3)', () => {
     const g0 = world(0, { 'trait:greedy': true });
     for (let s = 0; s < 50; s++) {
       const em = makeEmitter(6);
-      const g2 = applyMediatedOp(g0, { kind: 'grant', charId: 'char:ruler', amount: '20' }, 6, makeFortune(`g${s}`), em, MED, []);
+      const g2 = applyMediatedOp(g0, { kind: 'grant', charId: 'char:ruler', amount: '20' }, 6, makeFortune(`g${s}`), em, MED, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       if (band === 'poor' || band === 'botched') {
@@ -63,7 +63,7 @@ describe('mediated execution (spec §3)', () => {
   it('delta-equivalence: replaying every emitted delta reproduces the graph', () => {
     const pre = world(9000);
     const em = makeEmitter(7);
-    const g2 = applyMediatedOp(pre, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' }, 7, makeFortune('d'), em, MED, []);
+    const g2 = applyMediatedOp(pre, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' }, 7, makeFortune('d'), em, MED, 'seat:throne', []);
     const allDeltas = em.all().flatMap((e) => e.deltas);
     expect(allDeltas.length).toBeGreaterThan(0);
     const replayed = applyDeltas(pre, allDeltas);
@@ -76,7 +76,7 @@ describe('mediated execution riders (spec §3 riders)', () => {
     const g0 = world(0, { 'trait:meticulous': true }); // apt 0 -> ~20% raw-botched per draw
     for (let s = 0; s < 100; s++) {
       const em = makeEmitter(6);
-      applyMediatedOp(g0, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '5' }, 6, makeFortune(`met${s}`), em, MED, []);
+      applyMediatedOp(g0, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '5' }, 6, makeFortune(`met${s}`), em, MED, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       expect(band).not.toBe('botched');
@@ -87,7 +87,7 @@ describe('mediated execution riders (spec §3 riders)', () => {
     const g0 = world(0, { 'trait:slothful': true });
     for (let s = 0; s < 80; s++) {
       const em = makeEmitter(9);
-      const g2 = applyMediatedOp(g0, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '5' }, 9, makeFortune(`sl${s}`), em, MED, []);
+      const g2 = applyMediatedOp(g0, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '5' }, 9, makeFortune(`sl${s}`), em, MED, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       if (band === 'poor') {
@@ -106,7 +106,7 @@ describe('mediated execution riders (spec §3 riders)', () => {
     const g0 = world(9000, { 'trait:greedy': true });
     for (let s = 0; s < 50; s++) {
       const em = makeEmitter(10);
-      const g2 = applyMediatedOp(g0, { kind: 'grant', charId: 'char:ruler', amount: '20' }, 10, makeFortune(`hi${s}`), em, MED, []);
+      const g2 = applyMediatedOp(g0, { kind: 'grant', charId: 'char:ruler', amount: '20' }, 10, makeFortune(`hi${s}`), em, MED, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       if (band === 'sound' || band === 'outstanding') {
@@ -123,7 +123,7 @@ describe('mediated execution: null-domain ops bypass the office entirely', () =>
   it("a null-domain op (record_stance) applies directly -- the crown's own voice, no gate, no band", () => {
     const g0 = world(9000); // office:envoy (social) is never created in this fixture at all
     const em = makeEmitter(3);
-    const g2 = applyMediatedOp(g0, { kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }, 3, makeFortune('nd'), em, MED, []);
+    const g2 = applyMediatedOp(g0, { kind: 'record_stance', stanceId: 'granary-doctrine', value: 'for' }, 3, makeFortune('nd'), em, MED, 'seat:throne', []);
     expect(em.all().some((e) => e.type === 'op.record_stance')).toBe(true);
     expect(em.all().some((e) => e.type === 'op.executed')).toBe(false);
     expect(getNode(g2, 'inst:crown').props['stance:granary-doctrine']).toBe('for');
@@ -179,7 +179,7 @@ describe('mediated execution: band-scaled ops re-validate against the unscaled c
     const g0 = world(9000); // apt 9000 -> 250/1000 outstanding weight
     for (let s = 0; s < 50; s++) {
       const em = makeEmitter(5);
-      const g2 = applyMediatedOp(g0, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '200' }, 5, makeFortune(`out${s}`), em, MED, []);
+      const g2 = applyMediatedOp(g0, { kind: 'stockpile_grain', placeId: 'place:ash', amount: '200' }, 5, makeFortune(`out${s}`), em, MED, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       if (band === 'outstanding') {
@@ -201,7 +201,7 @@ describe('mediated execution: band-scaled ops re-validate against the unscaled c
     g0 = addEdge(g0, { type: 'appointment', src: 'char:mar', dst: 'office:marshal', props: { since: 0 } });
     for (let s = 0; s < 50; s++) {
       const em = makeEmitter(5);
-      const g2 = applyMediatedOp(g0, { kind: 'seize', charId: 'char:target', amount: '50' }, 5, makeFortune(`sz${s}`), em, MED, []);
+      const g2 = applyMediatedOp(g0, { kind: 'seize', charId: 'char:target', amount: '50' }, 5, makeFortune(`sz${s}`), em, MED, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       if (band === 'outstanding') {
@@ -221,7 +221,7 @@ describe('mediated execution: band-scaled ops re-validate against the unscaled c
     g0 = addEdge(g0, { type: 'appointment', src: 'char:env', dst: 'office:envoy', props: { since: 0 } });
     for (let s = 0; s < 50; s++) {
       const em = makeEmitter(5);
-      const g2 = applyMediatedOp(g0, { kind: 'hold_festival', placeId: 'place:ash', amount: '10' }, 5, makeFortune(`hf${s}`), em, MED, []);
+      const g2 = applyMediatedOp(g0, { kind: 'hold_festival', placeId: 'place:ash', amount: '10' }, 5, makeFortune(`hf${s}`), em, MED, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       if (band === 'poor') {
@@ -292,7 +292,7 @@ describe('willingness (spec §3.5 — deterministic, no dice)', () => {
     expect(willingnessOf(g0, 'char:mar', op, 'char:ruler')).toBe('refuses');
 
     const em = makeEmitter(6);
-    const g2 = applyMediatedOp(g0, op, 6, makeFortune('strike-own'), em, { ...MED, willingness: true }, []);
+    const g2 = applyMediatedOp(g0, op, 6, makeFortune('strike-own'), em, { ...MED, willingness: true }, 'seat:throne', []);
     expect(g2).toBe(g0); // nothing else happens: graph unchanged
     expect(em.all().some((e) => e.type === 'op.executed')).toBe(false);
     expect(em.all().some((e) => e.type === 'op.imprison')).toBe(false);
@@ -355,7 +355,7 @@ describe('willingness integration: applyMediatedOp (spec §3.5)', () => {
     expect(willingnessOf(g0, 'char:st', op, 'char:ruler')).toBe('refuses');
 
     const em = makeEmitter(6);
-    const g2 = applyMediatedOp(g0, op, 6, makeFortune('venge'), em, { ...MED, willingness: true }, []);
+    const g2 = applyMediatedOp(g0, op, 6, makeFortune('venge'), em, { ...MED, willingness: true }, 'seat:throne', []);
     expect(g2).toBe(g0);
     expect(em.all().some((e) => e.type === 'op.executed')).toBe(false);
     const refused = em.all().find((e) => e.type === 'op.refused');
@@ -382,9 +382,9 @@ describe('willingness integration: applyMediatedOp (spec §3.5)', () => {
     const op = { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' } as const;
 
     const emOff = makeEmitter(4);
-    const gOff = applyMediatedOp(g0, op, 4, makeFortune('cmp-eq'), emOff, MED, []);
+    const gOff = applyMediatedOp(g0, op, 4, makeFortune('cmp-eq'), emOff, MED, 'seat:throne', []);
     const emOn = makeEmitter(4);
-    const gOn = applyMediatedOp(g0, op, 4, makeFortune('cmp-eq'), emOn, { ...MED, willingness: true }, []);
+    const gOn = applyMediatedOp(g0, op, 4, makeFortune('cmp-eq'), emOn, { ...MED, willingness: true }, 'seat:throne', []);
 
     expect(hashValue(gOn)).toBe(hashValue(gOff));
     expect(emOn.all()).toEqual(emOff.all());
@@ -396,7 +396,7 @@ describe('willingness integration: applyMediatedOp (spec §3.5)', () => {
     const op = { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' } as const;
     for (let s = 0; s < 20; s++) {
       const em = makeEmitter(6);
-      applyMediatedOp(g0, op, 6, makeFortune(`drag${s}`), em, { ...MED, willingness: true }, []);
+      applyMediatedOp(g0, op, 6, makeFortune(`drag${s}`), em, { ...MED, willingness: true }, 'seat:throne', []);
       const ex = em.all().find((e) => e.type === 'op.executed');
       const band = (ex!.data as { band: string }).band;
       expect(['botched', 'poor']).toContain(band); // capped: never sound/outstanding
@@ -412,7 +412,7 @@ describe('willingness integration: applyMediatedOp (spec §3.5)', () => {
     const op = { kind: 'stockpile_grain', placeId: 'place:ash', amount: '10' } as const;
     for (let s = 0; s < 20; s++) {
       const em = makeEmitter(6);
-      applyMediatedOp(g0, op, 6, makeFortune(`sldrag${s}`), em, { ...MED, willingness: true }, []);
+      applyMediatedOp(g0, op, 6, makeFortune(`sldrag${s}`), em, { ...MED, willingness: true }, 'seat:throne', []);
       const delayed = em.all().filter((e) => e.type === 'op.delayed');
       expect(delayed).toHaveLength(1); // slothfulDelay and the willingness cap would both qualify -- only one fires
       expect((delayed[0]!.data as { untilTick: number }).untilTick).toBe(8);
@@ -442,7 +442,7 @@ describe('willingness integration: applyMediatedOp (spec §3.5)', () => {
     gRefuse = addEdge(gRefuse, { type: 'loyalty', src: 'char:st', dst: 'char:ruler', props: { bp: 2000 } }); // refuses
 
     const emR = makeEmitter(tick);
-    const g2 = applyMediatedOp(gRefuse, op, tick, spy, emR, { ...MED, willingness: true }, []);
+    const g2 = applyMediatedOp(gRefuse, op, tick, spy, emR, { ...MED, willingness: true }, 'seat:throne', []);
     expect(g2).toBe(gRefuse); // unchanged
     expect(emR.all().some((e) => e.type === 'op.executed')).toBe(false);
     expect(emR.all().some((e) => e.type === 'op.refused')).toBe(true);
@@ -460,7 +460,7 @@ describe('willingness integration: applyMediatedOp (spec §3.5)', () => {
     const expectedBand = drawBand(aptOf(gComply, 'char:st', 'apt:econ'), spy, tick, canonJson(op));
 
     const emC = makeEmitter(tick);
-    applyMediatedOp(gComply, op, tick, spy, emC, { ...MED, willingness: true }, []);
+    applyMediatedOp(gComply, op, tick, spy, emC, { ...MED, willingness: true }, 'seat:throne', []);
     const ex = emC.all().find((e) => e.type === 'op.executed');
     expect(ex).toBeDefined();
     expect((ex!.data as { band: string }).band).toBe(expectedBand);
