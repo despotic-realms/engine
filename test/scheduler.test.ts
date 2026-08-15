@@ -7,7 +7,7 @@ import { advanceArcs, examiner } from '../src/scheduler.js';
 import { eligibleStorylets } from '../src/storylet.js';
 import { starterDeck } from '../src/decks/starter.js';
 import { thornfieldGraph, thornfieldStressedGraph } from '../src/decks/thornfield.js';
-import type { ExaminerCalendar } from '../src/scheduler.js';
+import type { Booking, ExaminerCalendar } from '../src/scheduler.js';
 import type { EligibleEntry, Storylet } from '../src/storylet.js';
 
 // Minimal hand-built brief-kind entries for exercising select()'s budget
@@ -41,6 +41,11 @@ const noneNewlyEligible: Set<string> = new Set();
 // (empty attributed partition consumes zero slots), which is exactly T1's
 // existing [newly, standing] behavior for these calls.
 const noBecauseOf: Map<string, string[]> = new Map();
+// Causality §3 (T4, bookings): same reasoning again -- no bookings in play
+// here, so the due-bookings block in examiner.select is a no-op loop for
+// every call in this file. See test/bookings.test.ts for the booking-
+// specific cases.
+const noBookings: Booking[] = [];
 const CAL: ExaminerCalendar = [
   { tick: 4, storyletId: 'starter.audit-whisper' },
   { tick: 4, armFamine: { placeId: 'place:thornfield', durationTicks: 4 } },
@@ -50,16 +55,16 @@ const CAL: ExaminerCalendar = [
 describe('examiner', () => {
   it('forces calendar probes, fills the rest from the casting stream', () => {
     const eligible = eligibleStorylets(thornfieldGraph(), [starterDeck], {}, 4, {});
-    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.chosen.map((e) => e.storylet.id)).toContain('starter.audit-whisper');
     expect(sel.chosen).toHaveLength(2);
     expect(sel.letters.every((e) => e.storylet.kind === 'letter')).toBe(true);
-    const again = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const again = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar: CAL, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });
   it('records unfillable probes instead of inventing them', () => {
     const eligible = eligibleStorylets(thornfieldGraph(), [starterDeck], {}, 9, {});
-    const sel = examiner.select({ tick: 9, briefBudget: 1, eligible, fortune: f, calendar: CAL, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 9, briefBudget: 1, eligible, fortune: f, calendar: CAL, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.skippedProbes).toEqual(['starter.not-in-deck']);
   });
   it('records a budget-blocked forced probe in skippedProbes, not just an absent one', () => {
@@ -69,7 +74,7 @@ describe('examiner', () => {
       { tick: 4, storyletId: 'probe.two' },
       { tick: 4, storyletId: 'probe.three' },
     ];
-    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible, fortune: f, calendar, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one', 'probe.two']);
     expect(sel.skippedProbes).toEqual(['probe.three']);
   });
@@ -79,7 +84,7 @@ describe('examiner', () => {
       { tick: 4, storyletId: 'probe.one' },
       { tick: 4, storyletId: 'probe.one' },
     ];
-    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible, fortune: f, calendar, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible, fortune: f, calendar, presented: {}, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one']);
     expect(sel.skippedProbes).toEqual([]);
   });
@@ -95,21 +100,21 @@ describe('novelty-stratified casting (D13)', () => {
   it('fills the budget from the least-presented stratum before touching a more-presented entry', () => {
     const pool = [mkBriefEntry('a'), mkBriefEntry('b'), mkBriefEntry('c')];
     const presented = { a: 0, b: 1, c: 0 };
-    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.chosen).toHaveLength(2);
     expect(sel.chosen.map((e) => e.storylet.id).sort()).toEqual(['a', 'c']); // b (count 1) excluded
   });
   it('reaches into the next stratum only once the lower one is exhausted', () => {
     const pool = [mkBriefEntry('a'), mkBriefEntry('b'), mkBriefEntry('c')];
     const presented = { a: 0, b: 1, c: 0 };
-    const sel = examiner.select({ tick: 4, briefBudget: 3, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 4, briefBudget: 3, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.chosen.map((e) => e.storylet.id)).toHaveLength(3);
     expect(sel.chosen[2]?.storylet.id).toBe('b'); // the sole count-1 entry, cast last regardless of a/c order
   });
   it('all-equal counts reduce to the plain seeded lottery over the whole pool', () => {
     const pool = [mkBriefEntry('a'), mkBriefEntry('b'), mkBriefEntry('c'), mkBriefEntry('d')];
     const presented = { a: 3, b: 3, c: 3, d: 3 };
-    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.chosen).toHaveLength(2);
     for (const e of sel.chosen) expect(pool).toContain(e);
     // A tied stratum equals the full remaining pool at every slot, so the
@@ -123,14 +128,14 @@ describe('novelty-stratified casting (D13)', () => {
       remaining = remaining.filter((e) => e !== pick);
     }
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(expected);
-    const again = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const again = examiner.select({ tick: 4, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });
   it('a calendar-forced probe fires at a high presented count -- probes bypass stratification', () => {
     const pool = [mkBriefEntry('probe.one'), mkBriefEntry('fresh')];
     const presented = { 'probe.one': 50, fresh: 0 };
     const calendar: ExaminerCalendar = [{ tick: 4, storyletId: 'probe.one' }];
-    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar, presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf });
+    const sel = examiner.select({ tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar, presented, newlyEligible: noneNewlyEligible, becauseOf: noBecauseOf, bookings: noBookings });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe.one']);
   });
 });

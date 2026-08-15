@@ -29,6 +29,16 @@ export type ExaminerCalendar = Array<{
   armFamine?: { placeId: string; durationTicks: number };
 }>;
 
+/** Causality §3 (T4): one booked follow-up (spec §3) -- StoryletOption.books
+ *  applied at choice-application time (tick.ts, any path that lands the
+ *  chosen option: attended, defaulted, neglected) appends one of these to
+ *  ReignState.bookings, threaded like `arcs`/`eligibleLastTick`. `byTick` is
+ *  the LAST tick (inclusive) this booking is still due -- computed once, at
+ *  record time, as (the tick the option was chosen) + withinTicks; select()
+ *  below never recomputes it, only compares `tick <= byTick`. `bookedAt` is
+ *  informational only (content/debugging), never read here. */
+export interface Booking { storyletId: string; seatId: string; byTick: number; bookedAt: number }
+
 export interface SchedulerContext {
   tick: number;
   briefBudget: number;
@@ -59,12 +69,32 @@ export interface SchedulerContext {
    *  ancestry logic, per the causality plan's file structure (attribution.ts
    *  owns the model). */
   becauseOf: Map<string, string[]>;
+  /** Causality §3 (T4): ReignState.bookings, unfiltered -- select() reads
+   *  every booking regardless of due-ness and applies the `tick <= byTick`
+   *  gate itself (mirrors how it already owns the calendar-tick match for
+   *  probes, just above). Read-only here: recording (choice application)
+   *  and removal (dealt or lapsed, via SchedulerSelection's
+   *  dealtBookings/lapsedBookings below) both live in tick.ts -- see this
+   *  file's header, "examiner.select... mutates nothing and emits nothing." */
+  bookings: Booking[];
 }
 
 export interface SchedulerSelection {
   chosen: EligibleEntry[];
   letters: EligibleEntry[];
   skippedProbes: string[];
+  /** Causality §3 (T4): bookings force-dealt this tick -- the SAME object
+   *  references as their matching entries in ctx.bookings, so tick.ts can
+   *  remove them from ReignState.bookings by identity (`.includes`) without
+   *  needing a synthetic booking id. The deal itself needs no event of its
+   *  own: the forced entry rides the ordinary brief.presented path exactly
+   *  like a probe or a lottery pick. */
+  dealtBookings: Booking[];
+  /** Causality §3 (T4): bookings that expired unfilled this tick (due --
+   *  tick === byTick -- and still not dealt, whether never eligible or
+   *  crowded out). tick.ts emits scene.booking.lapsed for each and removes
+   *  them from ReignState.bookings the same way. */
+  lapsedBookings: Booking[];
 }
 
 export interface SchedulerPolicy {
@@ -122,7 +152,7 @@ function castByNovelty(
 
 export const examiner: SchedulerPolicy = {
   name: 'examiner',
-  select({ tick, briefBudget, eligible, fortune, calendar, presented, newlyEligible, becauseOf }) {
+  select({ tick, briefBudget, eligible, fortune, calendar, presented, newlyEligible, becauseOf, bookings }) {
     const letters = eligible.filter((e) => e.storylet.kind === 'letter');
     const pool = eligible.filter((e) => e.storylet.kind === 'brief');
     const chosen: EligibleEntry[] = [];
@@ -136,6 +166,47 @@ export const examiner: SchedulerPolicy = {
       if (hit && chosen.length < briefBudget) chosen.push(hit);
       else skippedProbes.push(entry.storyletId); // absent from the pool, or budget already spent -- either way, unobserved
     }
+
+    // Causality §3 (T4): due bookings force-deal next -- after probes,
+    // before the recency/attribution lottery strata below -- consuming NO
+    // fortune draws (an authored booking is a certainty, not a lottery
+    // entry), so the slot counter castByNovelty threads below always starts
+    // at 0 regardless of how many bookings just dealt. An empty `bookings`
+    // array (every pre-T4 call site) makes this whole loop a no-op, so the
+    // no-bookings path reproduces T2's exact behavior byte-for-byte,
+    // including its fortune draw sequence. Sorted by (storyletId, bookedAt,
+    // seatId) for fully order-stable processing regardless of
+    // ReignState.bookings' own insertion order (Global Constraints:
+    // "bookings processed in sorted stable order") -- the tuple ties only
+    // when the SAME storyletId was booked more than once, which has no
+    // other natural tiebreak once threaded through plain-object state.
+    const dealtBookings: Booking[] = [];
+    const lapsedBookings: Booking[] = [];
+    const sortedBookings = [...bookings].sort((a, b) =>
+      a.storyletId !== b.storyletId ? (a.storyletId < b.storyletId ? -1 : 1) :
+      a.bookedAt !== b.bookedAt ? a.bookedAt - b.bookedAt :
+      a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0,
+    );
+    for (const booking of sortedBookings) {
+      if (tick > booking.byTick) continue; // defensive only -- tick.ts always lapses AT byTick, never lets one outlive it
+      // Multi-binding tie-break (causality plan T4): a perBinding storylet
+      // can produce more than one currently-eligible EligibleEntry sharing
+      // this storyletId -- sorted first by instanceKey, deterministic and
+      // independent of fortune (bookings never draw). Also excludes
+      // whatever a probe (or an earlier booking this same pass) already
+      // claimed, the same dedup probes apply to themselves above.
+      const candidates = pool
+        .filter((e) => e.storylet.id === booking.storyletId && !chosen.includes(e))
+        .sort((a, b) => (a.instanceKey < b.instanceKey ? -1 : a.instanceKey > b.instanceKey ? 1 : 0));
+      const hit = candidates[0];
+      if (hit !== undefined && chosen.length < briefBudget) {
+        chosen.push(hit);
+        dealtBookings.push(booking);
+      } else if (tick === booking.byTick) {
+        lapsedBookings.push(booking); // last due tick, still not dealt (ineligible, or crowded out) -- expires unfilled
+      } // else: holds -- still within window (tick < byTick), tries again next tick
+    }
+
     // Causality §1: recency + attribution casting. Partition what's left
     // into [newly, standing] (T1), then split `newly` further into
     // [attributed, world-newly] (T2, via `becauseOf` membership) and run
@@ -163,7 +234,7 @@ export const examiner: SchedulerPolicy = {
     chosen.push(...worldCast.chosen);
     const standingCast = castByNovelty(standing, briefBudget - chosen.length, presented, fortune, tick, worldCast.nextSlot);
     chosen.push(...standingCast.chosen);
-    return { chosen, letters, skippedProbes };
+    return { chosen, letters, skippedProbes, dealtBookings, lapsedBookings };
   },
 };
 

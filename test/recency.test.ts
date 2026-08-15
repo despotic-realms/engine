@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { makeFortune } from '../src/fortune.js';
 import { setNodeProp } from '../src/graph.js';
 import { examiner } from '../src/scheduler.js';
+import type { Booking } from '../src/scheduler.js';
 import { eligibleStorylets } from '../src/storylet.js';
 import { starterSeason } from '../src/decks/starter.js';
 import { thornfieldGraph } from '../src/decks/thornfield.js';
@@ -87,6 +88,13 @@ const empty = { seatId: 'seat:throne', choices: [] };
 // scheduler.ts's world-newly sub-partition, reproducing this file's
 // pre-T2 [newly, standing] behavior exactly (see scheduler.ts's comment).
 const noBecauseOf: Map<string, string[]> = new Map();
+// Causality §3 (T4, bookings): this file is about the [newly, standing]
+// partition, not bookings -- an empty array means the due-bookings block in
+// examiner.select is a no-op loop, so every call here reproduces this
+// file's pre-T4 behavior exactly (see scheduler.ts's comment on the
+// no-bookings path). See test/bookings.test.ts for the booking-specific
+// cases.
+const noBookings: Booking[] = [];
 
 describe('examiner.select: recency partition (causality §1)', () => {
   it('a newly-eligible instance is dealt before a standing instance at equal presented counts; a tied newly/newly pair still resolves by the seeded lottery', () => {
@@ -101,7 +109,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // the wrong reason.
     const sel = examiner.select({
       tick: 0, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['newly']), becauseOf: noBecauseOf,
+      newlyEligible: new Set(['newly']), becauseOf: noBecauseOf, bookings: noBookings,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['newly']);
 
@@ -111,7 +119,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // decides, exactly as it would pre-T1.
     const bothNewly = examiner.select({
       tick: 0, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['standing', 'newly']), becauseOf: noBecauseOf,
+      newlyEligible: new Set(['standing', 'newly']), becauseOf: noBecauseOf, bookings: noBookings,
     });
     const expectedPick = f.pick('casting', 0, 'slot', pool, 0);
     expect(bothNewly.chosen).toEqual([expectedPick]);
@@ -122,7 +130,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     const presented = { 'newly-shown-twice': 2, 'newly-fresh': 0 };
     const sel = examiner.select({
       tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['newly-shown-twice', 'newly-fresh']), becauseOf: noBecauseOf,
+      newlyEligible: new Set(['newly-shown-twice', 'newly-fresh']), becauseOf: noBecauseOf, bookings: noBookings,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['newly-fresh']);
   });
@@ -169,7 +177,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // cannot pass "by accident" the way a same-relative-index coincidence
     // could for an equal-outcome tick).
     const sel = examiner.select({
-      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf,
+      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf, bookings: noBookings,
     });
 
     // Reference: the threaded-slot draw, computed independently by hand,
@@ -198,7 +206,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
 
     // Determinism: same inputs, same cast, every time.
     const again = examiner.select({
-      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf,
+      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf, bookings: noBookings,
     });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });

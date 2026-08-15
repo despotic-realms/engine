@@ -24,11 +24,11 @@ import type { Observation } from './observe.js';
 import { observeExecutions, vetObservation } from './observe.js';
 import type { ReportedLedger, Seat } from './report.js';
 import { compileReport } from './report.js';
-import type { ExaminerCalendar } from './scheduler.js';
+import type { Booking, ExaminerCalendar } from './scheduler.js';
 import { advanceArcs, examiner } from './scheduler.js';
 import type { Band, WantKey } from './spine.js';
 import { WANT_FULFILL, currentWant } from './spine.js';
-import type { Deck, Storylet } from './storylet.js';
+import type { Deck, Storylet, StoryletOption } from './storylet.js';
 import { bindOps, eligibleStorylets, renderTpl } from './storylet.js';
 import { economyStep, fingerprintDecayStep, socialStep } from './systems.js';
 
@@ -84,6 +84,17 @@ export interface ReignState {
    *  the start of a reign, so tick 1 finds every eligible brief newly
    *  eligible. */
   eligibleLastTick: string[];
+  /** Causality §3 (T4): booked follow-ups -- StoryletOption.books applied at
+   *  choice-application time (attended, defaulted, and neglected paths all
+   *  record; mediation is an ops-application detail underneath the SAME
+   *  choice and never gates recording) appends here. Threads through
+   *  resolveTick like arcs/eligibleLastTick: each call starts from the
+   *  prior snapshot, appends this tick's newly-recorded bookings, then
+   *  removes whatever examiner.select dealt or lapsed this tick before
+   *  returning. Empty at the start of a reign. Order-stable: select()
+   *  processes this array in a fixed sort of its own (storyletId, bookedAt,
+   *  seatId), never insertion order alone. */
+  bookings: Booking[];
 }
 
 export interface DecisionChoice {
@@ -124,7 +135,7 @@ export interface TickPacket {
 }
 
 export function initialState(season: SeasonConfig): ReignState {
-  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {}, eligibleLastTick: [] };
+  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {}, eligibleLastTick: [], bookings: [] };
 }
 
 const CHOICE_KEYS = new Set(['briefId', 'optionId', 'ops', 'via', 'compileRef']);
@@ -200,6 +211,18 @@ function findStorylet(season: SeasonConfig, id: string): Storylet {
     if (s) return s;
   }
   throw new Error(`no storylet '${id}' in season decks`);
+}
+
+// Causality §3 (T4): StoryletOption.books -> a ReignState.bookings entry.
+// byTick = the tick this option was chosen/defaulted (resolveTick's own
+// `tick`, i.e. state.tick -- NOT nextTick) PLUS withinTicks: the earliest a
+// booking can possibly deal is next tick (this same resolveTick call's own
+// step 9 casts for state.tick + 1), so withinTicks counts casting
+// opportunities from there -- withinTicks 1 means "must deal at next tick
+// or never," mirroring how fingerprints (ops.ts's stampDeed) stamp `at` as
+// the current tick and decay off `tick - at`.
+function recordBooking(books: NonNullable<StoryletOption['books']>, tick: number, seatId: string): Booking {
+  return { storyletId: books.storyletId, seatId, byTick: tick + books.withinTicks, bookedAt: tick };
 }
 
 // Rolling wants (spec §2, T7): after an op's own deltas land, every
@@ -299,6 +322,7 @@ export function resolveTick(
   const em = makeEmitter(tick);
   let g = state.graph;
   let arcs = state.arcs;
+  let bookings = state.bookings;
   const tierCfg = season.tiers[state.tier];
   if (!tierCfg) throw new Error(`no tier config for tier ${state.tier}`);
 
@@ -316,13 +340,26 @@ export function resolveTick(
   // 3. Apply attended ops in the agent's priority order.
   for (const choice of attended) {
     const pending = state.pending.find((p) => p.briefId === choice.briefId)!;
-    const ops = choice.optionId !== undefined
-      ? bindOps(findStorylet(season, pending.storyletId).options.find((o) => o.id === choice.optionId)!.ops, pending.binding)
-      : choice.ops ?? [];
+    const chosenOption = choice.optionId !== undefined
+      ? findStorylet(season, pending.storyletId).options.find((o) => o.id === choice.optionId)
+      : undefined;
+    const ops = chosenOption ? bindOps(chosenOption.ops, pending.binding) : choice.ops ?? [];
     for (const op of ops) {
       const r = validateOp(g, op);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
       g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!]);
+    }
+    // Causality §3 (T4): booking is a property of the CHOSEN OPTION, not of
+    // any individual op's success -- records once per attended choice whose
+    // option carries `books`, regardless of whether the ops above landed or
+    // were rejected (an option can also book with no ops at all). A raw
+    // directive choice (choice.optionId === undefined, chosenOption
+    // undefined) never books: `books` lives on a STORYLET OPTION, and a
+    // directive bypasses options entirely.
+    if (chosenOption?.books) {
+      const booking = recordBooking(chosenOption.books, tick, decisions.seatId);
+      bookings = [...bookings, booking];
+      em.emit('scene.booked', { parents: [decisionEvents.get(choice.briefId)!], data: { storyletId: booking.storyletId, byTick: booking.byTick } });
     }
   }
 
@@ -342,6 +379,16 @@ export function resolveTick(
       if (r.ok) {
         g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id]);
       } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
+    }
+    // Causality §3 (T4): the default path books too (plan test (e)) --
+    // covers BOTH brief.defaulted (never decided) and brief.neglected
+    // (decided but over the attention cut) since they share this one loop;
+    // parent is whichever of those two events this pending brief actually
+    // got emitted above.
+    if (defaultOption?.books) {
+      const booking = recordBooking(defaultOption.books, tick, decisions.seatId);
+      bookings = [...bookings, booking];
+      em.emit('scene.booked', { parents: [ev.id], data: { storyletId: booking.storyletId, byTick: booking.byTick } });
     }
   }
 
@@ -462,8 +509,21 @@ export function resolveTick(
   const becauseOf = attribute(g, newlyEligibleEntries, em.all(), new Set(decisionEvents.values()));
   // presented (pre-increment below) is the N-1 snapshot: this tick's own
   // presentations don't count toward its own selection.
-  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible, becauseOf });
+  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible, becauseOf, bookings });
   for (const id of sel.skippedProbes) em.emit('probe.skipped', { data: { storyletId: id, tick: nextTick } });
+  // Causality §3 (T4): a dealt booking needs no event of its own -- the
+  // forced entry rides the ordinary brief.presented emission below (sel.
+  // chosen doesn't distinguish HOW an entry was chosen), so this only has
+  // work to do for lapses. deltas: [] (the emitter default, omitted below)
+  // -- a booking's existence lives in ReignState.bookings alone, never the
+  // WorldGraph, so there is nothing to delta (state-field lifecycle, the
+  // same "informational only" shape arcs.ts's arc.poach.bid/
+  // arc.scheme.telegraph already use). No `parents` either, matching how
+  // EVERY arcs.ts lifecycle event (arc.retained, arc.departed, arc.restless,
+  // ...) omits it: a lapse is a scheduler-side systemic determination made
+  // at select() time, not descended from any one of this tick's decisions.
+  for (const b of sel.lapsedBookings) em.emit('scene.booking.lapsed', { data: { storyletId: b.storyletId } });
+  bookings = bookings.filter((b) => !sel.dealtBookings.includes(b) && !sel.lapsedBookings.includes(b));
 
   const pending: PendingBrief[] = [];
   const briefs: Brief[] = [];
@@ -507,7 +567,7 @@ export function resolveTick(
   });
 
   return {
-    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs, eligibleLastTick },
+    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs, eligibleLastTick, bookings },
     events: em.all(),
     packet: { tick: nextTick, tier, attentionSlots: nextCfg.attentionSlots, briefs, reports, correspondence },
   };

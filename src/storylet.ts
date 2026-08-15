@@ -16,7 +16,22 @@ export type TextTpl = string;
 /** An Op whose nodeId-typed string params may be '$var' references into the match binding. */
 export type OpTpl = Op;
 
-export interface StoryletOption { id: string; label: TextTpl; ops: OpTpl[] }
+export interface StoryletOption {
+  id: string;
+  label: TextTpl;
+  ops: OpTpl[];
+  /** Causality §3 (T4, spec §3): jump the casting lottery entirely. Choosing
+   *  this option -- attended, defaulted, or neglected, any path that applies
+   *  its ops (tick.ts) -- books `storyletId` as a force-dealt follow-up,
+   *  independent of whether those ops themselves land or get rejected.
+   *  `withinTicks` becomes `byTick` at record time (tick.ts's
+   *  recordBooking: the resolving tick + withinTicks) -- the last tick
+   *  (inclusive) examiner.select still tries to force-deal it before it
+   *  lapses unfilled. See ReignState.bookings (tick.ts) and
+   *  examiner.select's due-bookings block (scheduler.ts) for the full
+   *  record -> hold -> deal/lapse lifecycle. */
+  books?: { storyletId: string; withinTicks: number };
+}
 
 export interface Storylet {
   id: string;

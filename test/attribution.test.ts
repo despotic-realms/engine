@@ -25,11 +25,16 @@ import { thornfieldGraph } from '../src/decks/thornfield.js';
 import { starterSeason } from '../src/decks/starter.js';
 import { initialState, resolveTick } from '../src/tick.js';
 import type { GraphPattern } from '../src/match.js';
-import type { ExaminerCalendar } from '../src/scheduler.js';
+import type { Booking, ExaminerCalendar } from '../src/scheduler.js';
 import type { EligibleEntry, Storylet } from '../src/storylet.js';
 import type { SeasonConfig } from '../src/tick.js';
 
 const f = makeFortune('attribution-test-seed');
+// Causality §3 (T4, bookings): this file is about attribution, not
+// bookings -- an empty array makes the due-bookings block in
+// examiner.select a no-op loop. See test/bookings.test.ts for the
+// booking-specific cases.
+const noBookings: Booking[] = [];
 
 // A brief-kind entry reading (place, granary) -- mirrors the REAL
 // starter.granary-low storylet's pattern shape exactly (see
@@ -228,13 +233,13 @@ describe('attribute: causality §1 test scenarios', () => {
     const becauseOf = new Map([['attributed', ['t0.0']]]);
 
     const sel = examiner.select({
-      tick: 0, briefBudget: 4, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf,
+      tick: 0, briefBudget: 4, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf, bookings: noBookings,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe', 'attributed', 'world-newly', 'standing']);
 
     // Determinism: the same construction, called again, deals identically.
     const again = examiner.select({
-      tick: 0, briefBudget: 4, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf,
+      tick: 0, briefBudget: 4, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf, bookings: noBookings,
     });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });
