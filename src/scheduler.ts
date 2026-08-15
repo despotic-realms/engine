@@ -188,7 +188,20 @@ export const examiner: SchedulerPolicy = {
       a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0,
     );
     for (const booking of sortedBookings) {
-      if (tick > booking.byTick) continue; // defensive only -- tick.ts always lapses AT byTick, never lets one outlive it
+      // Past due (tick > byTick, not just ===): the booking's window closed
+      // before select() ever got to look at it -- e.g. a withinTicks <= 0
+      // booking has byTick <= the tick it was recorded on, already behind
+      // nextTick (this same resolveTick call's own step 9) the very first
+      // time any select() call evaluates it at all. Lapsing here (rather
+      // than the old silent `continue`, which skipped it into neither
+      // dealtBookings nor lapsedBookings and left it stuck in
+      // ReignState.bookings forever -- tick.ts's removal filter only
+      // subtracts what's in one of those two arrays) keeps the lifecycle
+      // TOTAL: every booking this loop sees terminates dealt or lapsed, on
+      // this pass or a later one, never neither. Also covers any other
+      // future path where select's first look at a booking lands past
+      // byTick, not just withinTicks <= 0.
+      if (tick > booking.byTick) { lapsedBookings.push(booking); continue; }
       // Multi-binding tie-break (causality plan T4): a perBinding storylet
       // can produce more than one currently-eligible EligibleEntry sharing
       // this storyletId -- sorted first by instanceKey, deterministic and

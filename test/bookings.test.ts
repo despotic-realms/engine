@@ -390,3 +390,85 @@ describe('ReignState.bookings round-trip + determinism (causality plan test (f))
     );
   });
 });
+
+// Review fix (post-T4): two Important findings against 1124ce3.
+//
+// Finding 1 -- a withinTicks <= 0 booking was permanently stuck. recordBooking
+// computes byTick at the RESOLVING tick (tick.ts's `tick`, i.e. state.tick),
+// but examiner.select's first-ever look at ANY booking happens at
+// nextTick = tick + 1 (this same resolveTick call's own step 9). With
+// withinTicks <= 0, byTick <= tick < nextTick, so the booking is already past
+// due the moment select() first sees it. The guard at scheduler.ts's due-
+// bookings loop (`if (tick > booking.byTick) continue;`) silently skipped
+// such a booking into NEITHER dealtBookings NOR lapsedBookings, so tick.ts's
+// removal filter (`bookings.filter((b) => !dealt.includes(b) &&
+// !lapsed.includes(b))`) never touched it either -- it sat in
+// ReignState.bookings forever, violating "dealt or expired bookings
+// removed." Fixed by lapsing instead of skipping past due, which also
+// covers any OTHER future path where select's first evaluation of a booking
+// lands after byTick, not just withinTicks <= 0.
+//
+// Finding 2 -- the lapse path (AT byTick, not past it) had no end-to-end
+// test: every existing lapse case above calls examiner.select() directly and
+// asserts only the returned lapsedBookings array, never exercising tick.ts's
+// wiring around it (the scene.booking.lapsed emission + the
+// ReignState.bookings removal filter). That wiring is untouched by the
+// finding-1 fix -- it was already correct -- so this is pinning coverage,
+// not a bug fix.
+describe('resolveTick: total lifecycle -- every booking terminates dealt or lapsed (review fix)', () => {
+  it('a withinTicks: 0 booking lapses on the very call that records it, and never resurfaces over 10 further ticks (finding 1 regression)', () => {
+    const season = seasonWith([mkBookingSource('r1.source', 'r1.target', 0), mkGated('r1.target')], 1);
+    const out0 = resolveTick(season, initialState(season), empty, f); // resolves tick 0 -> presents r1.source for tick 1
+    const brief = out0.packet.briefs.find((b) => b.storyletId === 'r1.source')!;
+    const decision = { seatId: 'seat:throne', choices: [{ briefId: brief.briefId, optionId: 'book-it' }] };
+
+    // Resolves tick 1: records the booking (byTick = 1 + 0 = 1). This SAME
+    // call's own step 9 evaluates select() at nextTick = 2 -- already past
+    // byTick 1 on the booking's very first evaluation, ever. Pre-fix: stuck
+    // (neither removed from state.bookings nor chronicled). Post-fix: lapses
+    // right here.
+    const out1 = resolveTick(season, out0.state, decision, f);
+    expect(out1.state.bookings).toEqual([]); // removed, not stuck at length 1
+    const lapsed = out1.events.find((e) => e.type === 'scene.booking.lapsed');
+    expect(lapsed).toBeDefined();
+    expect(lapsed?.data).toEqual({ storyletId: 'r1.target' });
+    expect(lapsed?.deltas).toEqual([]);
+    expect(lapsed?.parents).toEqual([]);
+
+    // Advance 10 further ticks with no decisions -- mirrors the reviewer's
+    // own reproduction horizon ("stuck at length 1 with no lapse event over
+    // 10 ticks"), now proving the fix holds throughout: no resurrection, no
+    // duplicate lapse emission.
+    let state = out1.state;
+    for (let i = 0; i < 10; i++) {
+      const out = resolveTick(season, state, empty, f);
+      expect(out.state.bookings).toEqual([]);
+      expect(out.events.some((e) => e.type === 'scene.booking.lapsed')).toBe(false);
+      state = out.state;
+    }
+  });
+
+  it('an ineligible-throughout booking holds through resolveTick, then lapses end-to-end with the correct chronicle event and state removal (finding 2 pin)', () => {
+    const season = seasonWith([mkBookingSource('r2.source', 'r2.target', 2), mkGated('r2.target')], 1);
+    const out0 = resolveTick(season, initialState(season), empty, f); // resolves tick 0 -> presents r2.source
+    const brief = out0.packet.briefs.find((b) => b.storyletId === 'r2.source')!;
+    const decision = { seatId: 'seat:throne', choices: [{ briefId: brief.briefId, optionId: 'book-it' }] };
+
+    // Resolves tick 1: records the booking (byTick = 1 + 2 = 3). This same
+    // call's own step 9 evaluates select() at nextTick 2 -- due (2 <= 3) but
+    // the target is gated off (never eligible), so it holds.
+    const out1 = resolveTick(season, out0.state, decision, f);
+    expect(out1.state.bookings).toEqual([{ storyletId: 'r2.target', seatId: 'seat:throne', byTick: 3, bookedAt: 1 }]);
+    expect(out1.events.some((e) => e.type === 'scene.booking.lapsed')).toBe(false); // (iii) hold persisted, visible end-to-end
+
+    // Resolves tick 2: step 9 evaluates select() at nextTick 3 === byTick --
+    // still ineligible, so it expires unfilled on this call.
+    const out2 = resolveTick(season, out1.state, empty, f);
+    const lapsed = out2.events.find((e) => e.type === 'scene.booking.lapsed');
+    expect(lapsed).toBeDefined(); // (i) scene.booking.lapsed fires
+    expect(lapsed?.data).toEqual({ storyletId: 'r2.target' });
+    expect(lapsed?.deltas).toEqual([]);
+    expect(lapsed?.parents).toEqual([]);
+    expect(out2.state.bookings).toEqual([]); // (ii) removed from the returned ReignState.bookings
+  });
+});
