@@ -102,6 +102,17 @@ export interface ReignState {
    *  processes this array in a fixed sort of its own (storyletId, bookedAt,
    *  seatId), never insertion order alone. */
   bookings: Booking[];
+  /** Playtest-3a #8a (consecutive-family suppression, appendix #8a): sorted,
+   *  deduped storyletIds dealt via a LOTTERY stratum (attributed/world-
+   *  newly/standing) on THIS state's tick -- never probes or bookings,
+   *  which force-deal outside the lottery entirely. Threads through
+   *  resolveTick exactly like eligibleLastTick: each call reads the prior
+   *  snapshot as scheduler.ts's ctx.dealtLastTick (the consecutive-family
+   *  exclusion, family-wide -- every instance sharing an excluded
+   *  storyletId, not just the one dealt), then overwrites it with what ITS
+   *  OWN lottery strata dealt for the next call to read. Empty at the start
+   *  of a reign, so tick 1 applies no suppression at all. */
+  dealtLastTick: string[];
 }
 
 export interface DecisionChoice {
@@ -142,7 +153,7 @@ export interface TickPacket {
 }
 
 export function initialState(season: SeasonConfig): ReignState {
-  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {}, eligibleLastTick: [], bookings: [] };
+  return { tick: 0, tier: season.startTier, graph: season.initialGraph, cooldowns: {}, firedOnce: {}, presented: {}, pending: [], arcs: {}, eligibleLastTick: [], bookings: [], dealtLastTick: [] };
 }
 
 const CHOICE_KEYS = new Set(['briefId', 'optionId', 'ops', 'via', 'compileRef']);
@@ -528,7 +539,12 @@ export function resolveTick(
   const becauseOf = attribute(g, newlyEligibleEntries, em.all(), new Set(decisionEvents.values()));
   // presented (pre-increment below) is the N-1 snapshot: this tick's own
   // presentations don't count toward its own selection.
-  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible, becauseOf, bookings });
+  const sel = examiner.select({ tick: nextTick, briefBudget: nextCfg.briefBudget, eligible, fortune, calendar: season.calendar, presented, newlyEligible, becauseOf, bookings, dealtLastTick: state.dealtLastTick });
+  // Playtest-3a #8a: this tick's lottery deals become NEXT tick's exclusion
+  // set -- deduped (a perBinding family can land more than one instance of
+  // the same storyletId in `lotteryDealt` when budget allows) and sorted
+  // (order-stable, matching eligibleLastTick's own convention just above).
+  const dealtLastTick = [...new Set(sel.lotteryDealt.map((e) => e.storylet.id))].sort();
   for (const id of sel.skippedProbes) em.emit('probe.skipped', { data: { storyletId: id, tick: nextTick } });
   // Causality §3 (T4): a dealt booking needs no event of its own -- the
   // forced entry rides the ordinary brief.presented emission below (sel.
@@ -586,7 +602,7 @@ export function resolveTick(
   });
 
   return {
-    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs, eligibleLastTick, bookings },
+    state: { tick: nextTick, tier, graph: g, cooldowns, firedOnce, presented, pending, arcs, eligibleLastTick, bookings, dealtLastTick },
     events: em.all(),
     packet: { tick: nextTick, tier, attentionSlots: nextCfg.attentionSlots, briefs, reports, correspondence },
   };

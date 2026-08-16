@@ -79,6 +79,24 @@ export interface SchedulerContext {
    *  dealtBookings/lapsedBookings below) both live in tick.ts -- see this
    *  file's header, "examiner.select... mutates nothing and emits nothing." */
   bookings: Booking[];
+  /** Playtest-3a #8a: sorted storyletIds dealt via a LOTTERY stratum
+   *  (attributed/world-newly/standing) on the PREVIOUS tick --
+   *  ReignState.dealtLastTick (tick.ts), threaded like eligibleLastTick/
+   *  bookings. Read-only here: a storyletId present here is excluded,
+   *  FAMILY-WIDE (every instance sharing it, not just the one instance
+   *  that dealt), from this tick's combined lottery candidate pool --
+   *  unless exclusion would leave fewer candidates than the remaining
+   *  budget, in which case the starvation fallback
+   *  (applyFamilySuppression, below) re-admits enough excluded families
+   *  back in to cover the shortfall. Probes and due bookings above never
+   *  consult this at all -- they force-deal unconditionally, before
+   *  `remaining` is even computed -- so a storylet that dealt last tick
+   *  via one of those two paths, or is ITSELF probed/booked again this
+   *  tick, still deals today regardless. Empty at the start of a reign
+   *  (tick 1) and on any tick where the lottery dealt nothing at all the
+   *  tick before, making this whole mechanism a byte-identical no-op
+   *  then. */
+  dealtLastTick: readonly string[];
 }
 
 export interface SchedulerSelection {
@@ -97,6 +115,14 @@ export interface SchedulerSelection {
    *  crowded out). tick.ts emits scene.booking.lapsed for each and removes
    *  them from ReignState.bookings the same way. */
   lapsedBookings: Booking[];
+  /** Playtest-3a #8a: the subset of `chosen` that came from one of the
+   *  THREE LOTTERY STRATA this tick (attributed/world-newly/standing) --
+   *  excludes probes and dealtBookings, which force-deal without ever
+   *  touching the suppression-filtered pool. tick.ts dedupes this by
+   *  storylet id, sorts it, and writes the result into
+   *  ReignState.dealtLastTick for the NEXT tick's applyFamilySuppression
+   *  to read. */
+  lotteryDealt: EligibleEntry[];
 }
 
 export interface SchedulerPolicy {
@@ -152,9 +178,69 @@ function castByNovelty(
   return { chosen, nextSlot: slot };
 }
 
+// Playtest-3a #8a: consecutive-family suppression. Per-instance cooldowns
+// (storylet.ts's eligibleStorylets, keyed by instanceKey) don't stop a
+// perBinding storylet FAMILY from dealing every tick with a rotating cast --
+// each binding's own cooldown is fresh the moment a DIFFERENT binding is the
+// one dealt, so the family as a WHOLE never rests even though no single
+// INSTANCE ever breaks its own cooldown. Felt in blind playtest as "the
+// dealer's small deck shows badly": a fence/debt/rider storylet dealing 4-5
+// ticks running, a different bound character each time. Fix: a storyletId
+// dealt via one of the three LOTTERY STRATA (attributed/world-newly/
+// standing) on the PREVIOUS tick is excluded from the COMBINED candidate
+// pool this tick, family-wide -- not just the one instance that dealt --
+// before the [newly, standing] split (and its further [attributed,
+// world-newly] split) ever runs, so every stratum sees the same exclusion.
+// Probes and bookings are untouched by construction: this function only
+// ever sees `remaining` (computed in `select` AFTER both of those loops
+// have already claimed their entries out of `pool`), so a probed/booked
+// storylet still force-deals even when its family dealt last tick via the
+// lottery, and dealing it that way never re-suppresses it either (only
+// `lotteryDealt` -- the lottery strata's own output -- feeds next tick's
+// dealtLastTick).
+//
+// Starvation fallback: suppression must never leave the scheduler with
+// fewer CANDIDATES than the remaining BUDGET, or a healthy reign could deal
+// fewer briefs than the unsuppressed scheduler would, purely because
+// yesterday's only content happens to be today's only content too (the
+// single-family-in-the-deck case, or a quiet tick where everything else has
+// gone briefly ineligible). When exclusion alone would starve the budget,
+// excluded families are re-admitted WHOLE (every instance of that
+// storyletId still present in `entries`, never a single binding on its
+// own) in sorted storyletId order -- deterministic and fortune-free, like
+// every other admission/order decision in this file -- stopping as soon as
+// candidates catch up to budget, or once every excluded family present has
+// been re-admitted (at which point this degrades to no suppression at all,
+// exactly matching what the unsuppressed scheduler would have seen).
+// Re-admission filters the ORIGINAL `entries` array by a revised exclusion
+// set rather than concatenating survivors with re-admitted entries, so the
+// result preserves `entries`' own order throughout -- the same pool order
+// eligibleStorylets/matchPattern produced -- exactly as if suppression had
+// never touched those instances at all.
+function applyFamilySuppression(
+  entries: readonly EligibleEntry[],
+  budget: number,
+  dealtLastTick: readonly string[],
+): EligibleEntry[] {
+  if (dealtLastTick.length === 0) return entries.filter(() => true); // tick 1 / nothing dealt last tick: no-op, byte-identical to pre-suppression
+  const excluded = new Set(dealtLastTick);
+  const survivors = entries.filter((e) => !excluded.has(e.storylet.id));
+  if (survivors.length >= budget) return survivors;
+
+  const excludedStoryletIds = [...new Set(entries.filter((e) => excluded.has(e.storylet.id)).map((e) => e.storylet.id))].sort();
+  const readmitted = new Set<string>();
+  let count = survivors.length;
+  for (const storyletId of excludedStoryletIds) {
+    if (count >= budget) break;
+    readmitted.add(storyletId);
+    count += entries.filter((e) => e.storylet.id === storyletId).length;
+  }
+  return entries.filter((e) => !excluded.has(e.storylet.id) || readmitted.has(e.storylet.id));
+}
+
 export const examiner: SchedulerPolicy = {
   name: 'examiner',
-  select({ tick, briefBudget, eligible, fortune, calendar, presented, newlyEligible, becauseOf, bookings }) {
+  select({ tick, briefBudget, eligible, fortune, calendar, presented, newlyEligible, becauseOf, bookings, dealtLastTick }) {
     const letters = eligible.filter((e) => e.storylet.kind === 'letter');
     const pool = eligible.filter((e) => e.storylet.kind === 'brief');
     const chosen: EligibleEntry[] = [];
@@ -238,7 +324,18 @@ export const examiner: SchedulerPolicy = {
     // calls in casting order (attributed -> world-newly -> standing) so no
     // two partitions' draws ever hash the same fortune key -- see
     // castByNovelty's comment.
-    const remaining = pool.filter((e) => !chosen.includes(e));
+    //
+    // Playtest-3a #8a: consecutive-family suppression runs BEFORE this
+    // three-way split, over the COMBINED pool -- a storyletId excluded here
+    // is excluded from all three strata at once this tick, never just
+    // re-applied piecemeal to whichever stratum it would have landed in.
+    // See applyFamilySuppression's own comment for the exclusion/
+    // starvation-fallback mechanics; an empty dealtLastTick (tick 1, or any
+    // tick where the lottery dealt nothing the tick before) makes this a
+    // byte-identical no-op, so every pre-existing casting-order/
+    // partition/slot-threading behavior above is unchanged.
+    const afterDeal = pool.filter((e) => !chosen.includes(e));
+    const remaining = applyFamilySuppression(afterDeal, briefBudget - chosen.length, dealtLastTick);
     const newly = remaining.filter((e) => newlyEligible.has(e.instanceKey));
     const standing = remaining.filter((e) => !newlyEligible.has(e.instanceKey));
     const attributedNewly = newly.filter((e) => becauseOf.has(e.instanceKey));
@@ -249,7 +346,12 @@ export const examiner: SchedulerPolicy = {
     chosen.push(...worldCast.chosen);
     const standingCast = castByNovelty(standing, briefBudget - chosen.length, presented, fortune, tick, worldCast.nextSlot);
     chosen.push(...standingCast.chosen);
-    return { chosen, letters, skippedProbes, dealtBookings, lapsedBookings };
+    // Playtest-3a #8a: storyletIds lottery-dealt THIS tick -- excludes
+    // probes/dealtBookings above (they never touch `remaining`/`newly`/
+    // `standing`) -- tick.ts dedupes-and-sorts this into
+    // ReignState.dealtLastTick for next tick's exclusion to read.
+    const lotteryDealt = [...attributedCast.chosen, ...worldCast.chosen, ...standingCast.chosen];
+    return { chosen, letters, skippedProbes, dealtBookings, lapsedBookings, lotteryDealt };
   },
 };
 
