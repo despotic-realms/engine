@@ -184,6 +184,77 @@ describe('examiner.select: consecutive-family suppression (playtest-3a #8a)', ()
   });
 });
 
+// v0.3.1 review finding (Important, T1 re-review): no test above exercises
+// a non-empty `newlyEligible` together with an overlapping `dealtLastTick`
+// -- every direct examiner.select fixture in the describe block above uses
+// noNewlyEligible (empty), so suppression was only ever pinned against
+// standing candidates. The behavior is correct BY CONSTRUCTION --
+// applyFamilySuppression (scheduler.ts) runs on `afterDeal`, producing
+// `remaining`, and ONLY THEN does `select` derive `newly`/`standing` by
+// filtering `remaining` -- so an excluded storyletId is gone before
+// newlyEligible membership is ever consulted, full stop. But nothing
+// pinned that ordering, so a future refactor that moved the suppression
+// call to filter only the `standing` partition (a plausible misreading of
+// "newly should always win, suppression is a standing-only throttle")
+// would silently exempt newly-eligible families from suppression, quietly
+// regressing the exact rotating-cast bug this whole file exists to fix,
+// for any family that also happens to be newly-eligible. These three
+// tests are PINS of the existing, already-correct behavior -- green from
+// the start, not manufactured RED -- verified instead by hand-applying
+// that exact refactor and confirming the first test below fails under it
+// (mutation evidence in task-1-report.md).
+describe('suppression x recency interaction (v0.3.1 review finding): suppression runs on the COMBINED pool, before the newly/standing split', () => {
+  it('an instanceKey in newlyEligible whose family dealt last tick is still excluded -- the alternative deals in its place (suppression beats recency)', () => {
+    const fam = mkBriefEntry('fam');       // newly-eligible AND its family dealt last tick
+    const other = mkBriefEntry('other');   // standing, unaffected by either signal
+    const pool = [fam, other];
+    const sel = examiner.select({
+      tick: 5, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented: {},
+      newlyEligible: new Set(['fam']), becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: ['fam'],
+    });
+    // 'fam' never reaches the newly/standing split at all this tick --
+    // applyFamilySuppression already dropped it from `remaining` -- so
+    // being newly-eligible buys it no exemption. 'other' is the sole
+    // surviving candidate, dealt deterministically (a singleton pool needs
+    // no fortune to resolve).
+    expect(sel.chosen).toEqual([other]);
+    expect(sel.lotteryDealt).toEqual([other]);
+  });
+
+  it('a DIFFERENT newly-eligible family, not in dealtLastTick, is unaffected by suppression happening elsewhere in the same pool -- it deals first, ahead of standing (recency still works under suppression)', () => {
+    const fam = mkBriefEntry('fam');           // excluded: its family dealt last tick
+    const fresh = mkBriefEntry('fresh');       // newly-eligible, NOT suppressed
+    const standing = mkBriefEntry('standing'); // standing, NOT suppressed
+    const pool = [fam, fresh, standing];
+    const sel = examiner.select({
+      tick: 5, briefBudget: 2, eligible: pool, fortune: f, calendar: [], presented: {},
+      newlyEligible: new Set(['fresh']), becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: ['fam'],
+    });
+    // 'fam' never appears (suppressed, and budget covers both survivors so
+    // this isn't even a starvation case). 'fresh' -- newly-eligible --
+    // casts in the newly partition BEFORE 'standing' reaches the standing
+    // partition, so it lands first in `chosen`, exactly as it would with
+    // no suppression signal present at all.
+    expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['fresh', 'standing']);
+  });
+
+  it('starvation fallback reaches newly too: when the suppressed newly-eligible family is the ONLY candidate, it still deals', () => {
+    const fam = mkBriefEntry('fam'); // newly-eligible, suppressed, AND the sole candidate
+    const sel = examiner.select({
+      tick: 5, briefBudget: 1, eligible: [fam], fortune: f, calendar: [], presented: {},
+      newlyEligible: new Set(['fam']), becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: ['fam'],
+    });
+    // Naive exclusion would leave zero candidates for a budget of 1 --
+    // applyFamilySuppression's starvation fallback re-admits 'fam' WHOLE
+    // before the newly/standing split ever runs, so it re-enters
+    // `remaining` (and from there, `newly`) like any other candidate, and
+    // the single-candidate newly partition deals it without needing a
+    // fortune draw to resolve.
+    expect(sel.chosen).toEqual([fam]);
+    expect(sel.lotteryDealt).toEqual([fam]);
+  });
+});
+
 // Real perBinding fixtures for the resolveTick-level tests below: the
 // rotating-cast bug is specifically about storylet.ts's eligibleStorylets
 // cap-then-take loop sliding a FRESH binding into view as an earlier one
