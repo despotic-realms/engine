@@ -30,6 +30,12 @@ const f = makeFortune('bookings-test-seed');
 const empty = { seatId: 'seat:throne', choices: [] };
 const noNewlyEligible: Set<string> = new Set();
 const noBecauseOf: Map<string, string[]> = new Map();
+// Playtest-3a #8a (consecutive-family suppression): this file is about
+// bookings, not suppression -- an empty array makes
+// applyFamilySuppression's exclusion a no-op for every direct
+// examiner.select call below. See test/consecutive.test.ts for the
+// suppression-specific cases.
+const noDealtLastTick: string[] = [];
 
 // Mirrors test/recency.test.ts's/test/attribution.test.ts's own mkBriefEntry:
 // pattern-free synthetic entries for exercising examiner.select's
@@ -64,7 +70,7 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
     // and picks it regardless of fortune (no brute-force tick search
     // needed, unlike T1/T2's ties-within-a-stratum tests).
     const sel = examiner.select({
-      tick: 0, briefBudget: 5, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf, bookings: [booking],
+      tick: 0, briefBudget: 5, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['probe', 'booked', 'attributed', 'world-newly', 'standing']);
     expect(sel.dealtBookings).toEqual([booking]);
@@ -72,7 +78,7 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
 
     // Determinism: identical construction, called again, deals identically.
     const again = examiner.select({
-      tick: 0, briefBudget: 5, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf, bookings: [booking],
+      tick: 0, briefBudget: 5, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible, becauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });
@@ -84,7 +90,7 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
     const booking: Booking = { storyletId: 'booked', seatId: 'seat:throne', byTick: 2, bookedAt: 1 };
     const sel = examiner.select({
       tick: 2, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented: {},
-      newlyEligible: new Set(['attributed']), becauseOf: new Map([['attributed', ['x']]]), bookings: [booking],
+      newlyEligible: new Set(['attributed']), becauseOf: new Map([['attributed', ['x']]]), bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['booked']);
     expect(sel.dealtBookings).toEqual([booking]);
@@ -100,7 +106,7 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
     // tick 5 (< byTick 6): the probe takes the sole budget slot; the
     // booking is due and eligible but crowded out -- holds, doesn't lapse.
     const sel5 = examiner.select({
-      tick: 5, briefBudget: 1, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking],
+      tick: 5, briefBudget: 1, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(sel5.chosen.map((e) => e.storylet.id)).toEqual(['probe']);
     expect(sel5.dealtBookings).toEqual([]);
@@ -109,7 +115,7 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
     // tick 6 (=== byTick): crowded out again -- this was its last due tick,
     // so it expires unfilled.
     const sel6 = examiner.select({
-      tick: 6, briefBudget: 1, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking],
+      tick: 6, briefBudget: 1, eligible: pool, fortune: f, calendar, presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(sel6.chosen.map((e) => e.storylet.id)).toEqual(['probe']);
     expect(sel6.dealtBookings).toEqual([]);
@@ -120,13 +126,13 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
     const booking: Booking = { storyletId: 'ghost', seatId: 'seat:throne', byTick: 5, bookedAt: 2 };
 
     const before = examiner.select({
-      tick: 4, briefBudget: 1, eligible: [], fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking],
+      tick: 4, briefBudget: 1, eligible: [], fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(before.dealtBookings).toEqual([]);
     expect(before.lapsedBookings).toEqual([]);
 
     const at = examiner.select({
-      tick: 5, briefBudget: 1, eligible: [], fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking],
+      tick: 5, briefBudget: 1, eligible: [], fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(at.dealtBookings).toEqual([]);
     expect(at.lapsedBookings).toEqual([booking]);
@@ -146,7 +152,7 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
     // unfixed scheduler, not a coincidental pass (e.g. tick 0 happens to
     // match by chance and would NOT be genuine RED).
     const sel = examiner.select({
-      tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking],
+      tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(sel.chosen).toEqual([bindingA]);
     expect(sel.chosen[0]?.instanceKey).toBe('multi@x=a');
@@ -162,7 +168,7 @@ describe('examiner.select: due-bookings force-deal (causality §3)', () => {
     };
     const booking: Booking = { storyletId: 'a-letter', seatId: 'seat:throne', byTick: 3, bookedAt: 1 };
     const sel = examiner.select({
-      tick: 3, briefBudget: 1, eligible: [letterEntry], fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking],
+      tick: 3, briefBudget: 1, eligible: [letterEntry], fortune: f, calendar: [], presented: {}, newlyEligible: noNewlyEligible, becauseOf: noBecauseOf, bookings: [booking], dealtLastTick: noDealtLastTick,
     });
     expect(sel.chosen).toEqual([]);
     expect(sel.letters).toEqual([letterEntry]); // still delivered normally, just not via the booking mechanism

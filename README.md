@@ -138,7 +138,10 @@ the pattern-possibility snapshot, unfiltered by cooldowns or fire caps) and
 diffs it against what is possible now. Newly-eligible briefs
 — ones the world only just made possible — deal ahead of standing briefs that
 have sat eligible without being shown, so a reign's attention budget goes
-toward what just changed before it repeats what's already on offer.
+toward what just changed before it repeats what's already on offer. A scene
+family dealt last tick rests a tick when alternatives exist, so a storylet
+with many bindings can't monopolize the budget by rotating through a fresh
+one each time.
 
 **Computed attribution** — within the newly-eligible set, the engine asks a
 narrower question: did the player's own decisions cause this, or did the

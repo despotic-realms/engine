@@ -95,6 +95,11 @@ const noBecauseOf: Map<string, string[]> = new Map();
 // no-bookings path). See test/bookings.test.ts for the booking-specific
 // cases.
 const noBookings: Booking[] = [];
+// Playtest-3a #8a (consecutive-family suppression): this file is about the
+// [newly, standing] partition, not suppression -- an empty array means
+// applyFamilySuppression's exclusion is a no-op for every call here. See
+// test/consecutive.test.ts for the suppression-specific cases.
+const noDealtLastTick: string[] = [];
 
 describe('examiner.select: recency partition (causality §1)', () => {
   it('a newly-eligible instance is dealt before a standing instance at equal presented counts; a tied newly/newly pair still resolves by the seeded lottery', () => {
@@ -109,7 +114,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // the wrong reason.
     const sel = examiner.select({
       tick: 0, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['newly']), becauseOf: noBecauseOf, bookings: noBookings,
+      newlyEligible: new Set(['newly']), becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: noDealtLastTick,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['newly']);
 
@@ -119,7 +124,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // decides, exactly as it would pre-T1.
     const bothNewly = examiner.select({
       tick: 0, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['standing', 'newly']), becauseOf: noBecauseOf, bookings: noBookings,
+      newlyEligible: new Set(['standing', 'newly']), becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: noDealtLastTick,
     });
     const expectedPick = f.pick('casting', 0, 'slot', pool, 0);
     expect(bothNewly.chosen).toEqual([expectedPick]);
@@ -130,7 +135,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     const presented = { 'newly-shown-twice': 2, 'newly-fresh': 0 };
     const sel = examiner.select({
       tick: 4, briefBudget: 1, eligible: pool, fortune: f, calendar: [], presented,
-      newlyEligible: new Set(['newly-shown-twice', 'newly-fresh']), becauseOf: noBecauseOf, bookings: noBookings,
+      newlyEligible: new Set(['newly-shown-twice', 'newly-fresh']), becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: noDealtLastTick,
     });
     expect(sel.chosen.map((e) => e.storylet.id)).toEqual(['newly-fresh']);
   });
@@ -177,7 +182,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
     // cannot pass "by accident" the way a same-relative-index coincidence
     // could for an equal-outcome tick).
     const sel = examiner.select({
-      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf, bookings: noBookings,
+      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: noDealtLastTick,
     });
 
     // Reference: the threaded-slot draw, computed independently by hand,
@@ -206,7 +211,7 @@ describe('examiner.select: recency partition (causality §1)', () => {
 
     // Determinism: same inputs, same cast, every time.
     const again = examiner.select({
-      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf, bookings: noBookings,
+      tick: 0, briefBudget, eligible: pool, fortune: f, calendar: [], presented, newlyEligible, becauseOf: noBecauseOf, bookings: noBookings, dealtLastTick: noDealtLastTick,
     });
     expect(again.chosen.map((e) => e.storylet.id)).toEqual(sel.chosen.map((e) => e.storylet.id));
   });
@@ -336,10 +341,27 @@ describe('possibility-set recency (final-review fix): cooldown re-entry is stand
     // Fixed behavior, captured empirically the same way (post-fix run of
     // this exact fixture/seed): no stratum-jumping means the three settle
     // into a tied rotation instead of the recycler racing ahead.
+    //
+    // Playtest-3a #8a re-pin: ticks 1-3 are byte-identical to the
+    // possibility-set fix alone (below), but tick 4 moves --
+    // consecutive-family suppression is now also live, and this is exactly
+    // the "pools change draws change" case the feature accepts by design.
+    // At tick 4, recycler/never-a/never-b are ALL tied at presented 1 for
+    // the first time (recycler's tick-2 cooldown clears exactly here);
+    // pre-suppression that's a 3-way tie ([never-a, never-b, recycler],
+    // eligibleStorylets' sorted pool order) and the seed's roll happened to
+    // land on 'never-a'. Suppression excludes 'never-b' from that tie (it
+    // was THIS fixture's tick-3 lottery deal), narrowing the tied pool to
+    // 2 ([never-a, recycler]) -- the SAME underlying fortune roll reduced
+    // modulo 2 instead of modulo 3 lands on a different entry, 'recycler'.
+    // Nothing downstream of tick 4 was hand-adjusted; the rest of the
+    // sequence (and the final presented counts) are the actual measured
+    // consequence of that one changed draw. Re-captured empirically
+    // (post-suppression run of this exact fixture/seed), not hand-derived.
     expect(dealt).toEqual([
-      'never-a', 'recycler', 'never-b', 'never-a', 'recycler', 'never-b', 'never-a', 'recycler',
+      'never-a', 'recycler', 'never-b', 'recycler', 'never-b', 'never-a', 'recycler', 'never-b',
     ]);
-    expect(state.presented).toEqual({ recycler: 3, 'never-a': 3, 'never-b': 2 });
+    expect(state.presented).toEqual({ recycler: 3, 'never-a': 2, 'never-b': 3 });
 
     // The general, seed-independent invariant this fixture is built to
     // prove (per the review's own framing): once the recycler's presented
