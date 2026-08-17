@@ -793,3 +793,92 @@ describe('resolveTick: tier-transition booking determinism + replay-equivalence 
     expect(hashValue(replayed.state)).toBe(hashValue(live.state));
   });
 });
+
+// Review fix (v0.4.1 review): an OPTION's `books` and a TRANSITION's
+// `books` can legally target the SAME storyletId -- e.g. a tier-0 brief's
+// default books the arrival scene as a fallback in case the transition is
+// slow to fire, and the transition books it too. No special-casing exists
+// for this anywhere (by design -- see the doc comments this review fix
+// added at TierRule.books in ladder.ts and at tick.ts's step 8): each
+// recording just appends its own ordinary, independent Booking to
+// ReignState.bookings, so this composes entirely through scheduler.ts's
+// PRE-EXISTING due-bookings tie-break (sort by storyletId, then bookedAt,
+// then seatId -- see examiner.select's own comment), left completely
+// unmodified by this feature. This test PINS already-correct, already-
+// verified behavior (an emergent consequence of composing two already-
+// tested recording paths through one already-tested tie-break) -- honest
+// green from the start, no RED phase, nothing here is new mechanism.
+//
+// Scenario mirrors the review's own: a tier-0 option's default books
+// shared.scene at (resolving) tick 1 -- byTick 1 + 3 = 4. The 0->1
+// transition fires at (resolving) tick 3 -- the next year-end -- and books
+// the SAME storyletId -- byTick 3 + 1 = 4. Both land due at the same
+// nextTick (4), racing for shared.scene's one eligible instance (only
+// reachable at all once tier flips to 1, this same call).
+describe('resolveTick: an option booking and a transition booking racing for the same storyletId (v0.4.1 review fix)', () => {
+  it('earliest bookedAt wins the one eligible slot; the other lapses cleanly the same tick; both terminate; two scene.booked land in the chronicle', () => {
+    const season = seasonForTransition({
+      startTier: 0,
+      tierRules: [{
+        from: 0, to: 1, kind: 'promote', note: 'return',
+        when: { nodes: [{ as: 'crown', type: 'institution' }] },
+        books: { storyletId: 'shared.scene', withinTicks: 1 }, // recorded at tick 3 -> byTick 4
+      }],
+      tiers: {
+        0: { deckIds: ['t0'], briefBudget: 1, attentionSlots: 1 },
+        1: { deckIds: ['t1'], briefBudget: 1, attentionSlots: 1 },
+      },
+      decks: [
+        // tier: 0 override -- mkDefaultBooks hardcodes tier: 1 (its usual
+        // home, a tier-1 storylet); this is metadata only (nothing at
+        // runtime reads Storylet.tier outside checkDeck, not invoked on
+        // these ad hoc fixtures), corrected here for hygiene since this
+        // storylet genuinely lives in a tier-0 deck.
+        { id: 't0', tier: 0, storylets: [{ ...mkDefaultBooks('race.source', 'shared.scene', 3), tier: 0 }] },
+        { id: 't1', tier: 1, storylets: [mkReturnScene('shared.scene')] },
+      ],
+    });
+    const f = makeFortune('v041-race-seed');
+    let state = initialState(season);
+    const outs: ReturnType<typeof resolveTick>[] = [];
+    for (let i = 0; i < 4; i++) {
+      const out = resolveTick(season, state, empty, f);
+      outs.push(out);
+      state = out.state;
+    }
+    const out1 = outs[1]!; // resolved tick 1: race.source defaults -> books shared.scene
+    const out3 = outs[3]!; // resolved tick 3: the transition fires -> ALSO books shared.scene
+
+    expect(out1.state.bookings).toEqual([{ storyletId: 'shared.scene', seatId: 'seat:throne', byTick: 4, bookedAt: 1 }]);
+
+    expect(out3.state.tier).toBe(1);
+    expect(out3.packet.tick).toBe(4);
+    // Winner deals -- the only brief this tick (budget 1, one eligible
+    // instance, no lottery competition at all: this tick's outcome is
+    // fully forced by the due-bookings tie-break, not fortune).
+    expect(out3.packet.briefs.map((b) => b.storyletId)).toEqual(['shared.scene']);
+    // Loser lapses the SAME tick (both were due at nextTick 4, and 4 was
+    // ALSO the last due tick for both -- see the byTick arithmetic above).
+    expect(out3.events.some((e) => e.type === 'scene.booking.lapsed' && e.data['storyletId'] === 'shared.scene')).toBe(true);
+    // Total lifecycle: both bookings terminated (one dealt, one lapsed),
+    // nothing left stuck.
+    expect(out3.state.bookings).toEqual([]);
+
+    // Two independent scene.booked events across the reign's chronicle --
+    // one per recording SOURCE (the option's default at tick 1, the
+    // transition at tick 3), both naming the same eventual byTick (4) --
+    // that shared byTick is WHY they end up racing for the same slot.
+    const allEvents = outs.flatMap((o) => o.events);
+    const bookedEvents = allEvents.filter((e) => e.type === 'scene.booked' && e.data['storyletId'] === 'shared.scene');
+    expect(bookedEvents).toHaveLength(2);
+    expect(bookedEvents.map((e) => e.data['byTick'])).toEqual([4, 4]);
+    // One parents to the option's brief.defaulted (tick 1), the other to
+    // the transition's tier.changed (tick 3) -- distinct honest causes,
+    // per each recording site's own parent choice.
+    const defaultedEvent = out1.events.find((e) => e.type === 'brief.defaulted');
+    const tierChangedEvent = out3.events.find((e) => e.type === 'tier.changed');
+    expect(bookedEvents.map((e) => e.parents)).toEqual(
+      expect.arrayContaining([[defaultedEvent!.id], [tierChangedEvent!.id]]),
+    );
+  });
+});

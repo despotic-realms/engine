@@ -43,7 +43,23 @@ export interface TierRule {
    *  ReignState.bookings vocabulary, exactly as before this field existed):
    *  see resolveTick's own ladder step and its comment for the recording
    *  site, the seatId choice (the transition has no deciding seat of its
-   *  own), and the scene.booked parent-event choice. */
+   *  own), and the scene.booked parent-event choice.
+   *
+   *  Review fix (v0.4.1): this `books` and a StoryletOption's `books`
+   *  (storylet.ts) are allowed to name the SAME storyletId in the same
+   *  reign -- e.g. a tier-0 brief's default books the arrival scene as a
+   *  fallback, and the transition books it too. No special-casing exists
+   *  for this anywhere: each recording just appends its own independent
+   *  Booking to ReignState.bookings, and scheduler.ts's PRE-EXISTING
+   *  due-bookings tie-break (sort by storyletId, then bookedAt, then
+   *  seatId -- unmodified by this feature) resolves the collision exactly
+   *  like any other same-storyletId collision -- earliest bookedAt claims
+   *  the one eligible instance, the other finds no candidate left and
+   *  lapses (if also due that tick) or holds. Two scene.booked events land
+   *  in the chronicle for one eventual arrival; both bookings still
+   *  terminate dealt-or-lapsed, never stuck. See test/bookings.test.ts's
+   *  "an option booking and a transition booking racing for the same
+   *  storyletId" test. */
   books?: NonNullable<StoryletOption['books']>;
 }
 

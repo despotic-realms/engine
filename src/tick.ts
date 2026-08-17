@@ -527,6 +527,20 @@ export function resolveTick(
     // event: the booking exists BECAUSE this transition happened, so
     // tier.changed is the honest cause -- the recording site has it in
     // scope for exactly this reason.
+    //
+    // Review fix (v0.4.1): this can race an OPTION's own `books` (steps
+    // 3/4 above) for the SAME storyletId -- e.g. a tier-0 brief's default
+    // already booked the arrival scene as a fallback before this
+    // transition's own `when` pattern ever matched, and now the transition
+    // books it too. No special-casing needed: this just appends a second,
+    // independent Booking to `bookings` alongside whatever's already
+    // there, and scheduler.ts's existing due-bookings tie-break (sort by
+    // storyletId, then bookedAt, then seatId) resolves it the same way it
+    // resolves any other same-storyletId collision -- earliest bookedAt
+    // wins the one eligible instance, the loser lapses cleanly (if also
+    // due) or holds. Two scene.booked events, one eventual arrival; both
+    // bookings still terminate dealt-or-lapsed. Pinned in
+    // test/bookings.test.ts.
     if (rule.books) {
       const booking = recordBooking(rule.books, tick, season.throne.id);
       bookings = [...bookings, booking];
