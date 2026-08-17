@@ -16,6 +16,7 @@ import type { WorldGraph } from './graph.js';
 import { edgesOfType } from './graph.js';
 import type { GraphPattern } from './match.js';
 import { matchPattern } from './match.js';
+import type { StoryletOption } from './storylet.js';
 
 export interface TierRule {
   from: number;
@@ -27,6 +28,23 @@ export interface TierRule {
    *  design note above applyTransition): the next tier's world swapped in,
    *  or the Tier-0 camp. */
   effects?: GraphDelta[];
+  /** v0.4.1: a transition may book its own arrival scene, guaranteeing a
+   *  pivotal scene deals right after a promotion/demotion instead of
+   *  competing in the same tick's novelty lottery against however much
+   *  content the transition just made possible (a tier flip can graft an
+   *  entire tier's cast in at once -- see content review's original
+   *  motivating case: ~51 storylets newly-possible in one tick against a
+   *  brief budget of 3). Identical shape to StoryletOption.books
+   *  (storylet.ts), reused verbatim rather than redeclared, so tick.ts's
+   *  existing recordBooking -- built for an OPTION's `books` -- accepts a
+   *  transition's `books` with no transition-specific branch of its own.
+   *  Recorded by tick.ts's step 8 immediately after this function returns
+   *  (not by applyTransition itself, which stays free of the Booking/
+   *  ReignState.bookings vocabulary, exactly as before this field existed):
+   *  see resolveTick's own ladder step and its comment for the recording
+   *  site, the seatId choice (the transition has no deciding seat of its
+   *  own), and the scene.booked parent-event choice. */
+  books?: NonNullable<StoryletOption['books']>;
 }
 
 export function checkLadder(g: WorldGraph, tier: number, tick: number, rules: readonly TierRule[]): TierRule | null {

@@ -500,7 +500,39 @@ export function resolveTick(
   // 8. Ladder.
   let tier = state.tier;
   const rule = checkLadder(g, tier, tick, season.tierRules);
-  if (rule) { g = applyTransition(g, rule, tick, em); tier = rule.to; }
+  if (rule) {
+    // nextId() read immediately before the one emit() call applyTransition
+    // always makes (events.ts's own contract for this pattern), so
+    // tierChangedId names that tier.changed event without applyTransition
+    // needing to return it -- ladder.ts stays free of the Booking/
+    // ReignState.bookings vocabulary, exactly as before TierRule.books
+    // existed.
+    const tierChangedId = em.nextId();
+    g = applyTransition(g, rule, tick, em);
+    tier = rule.to;
+    // v0.4.1: a transition's own `books` (ladder.ts) records exactly like a
+    // chosen option's (steps 3/4 above, same recordBooking helper -- their
+    // types are identical by construction) with two differences forced by
+    // there being no option/choice behind a transition: seatId is
+    // season.throne.id, not decisions.seatId -- a transition fires off
+    // checkLadder's own graph-pattern match, independent of what (if
+    // anything) decisions.choices contains, so it has no deciding seat of
+    // its own to inherit. (The two are guaranteed to be the SAME string
+    // regardless -- validateDecisions above already rejected any
+    // decisions.seatId !== season.throne.id, single-seat play -- so this
+    // reads identically either way; season.throne.id is used because it's
+    // the architecturally honest source, not because the value would
+    // differ.) And scene.booked parents to tier.changed (tierChangedId
+    // above) rather than to a decision/brief.defaulted/brief.neglected
+    // event: the booking exists BECAUSE this transition happened, so
+    // tier.changed is the honest cause -- the recording site has it in
+    // scope for exactly this reason.
+    if (rule.books) {
+      const booking = recordBooking(rule.books, tick, season.throne.id);
+      bookings = [...bookings, booking];
+      em.emit('scene.booked', { parents: [tierChangedId], data: { storyletId: booking.storyletId, byTick: booking.byTick } });
+    }
+  }
 
   // 9. Present the next tick.
   const nextTick = tick + 1;
