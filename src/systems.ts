@@ -83,11 +83,11 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
     // Three possible events, in this order: dole.distributed (relief, only
     // if dole had anything in it), granary.consumed (the baseline drain --
     // always chronicled, since a silent mutation here would leave the
-    // chronicle unable to describe a famine visually -- and, as of the
-    // deaths accumulator below, the vehicle for every shortfall tick's
-    // deathsCarry write too, whether or not it crosses this tick),
-    // famine.starvation (only once a shortfall's accumulated attrition
-    // crosses a whole person -- see the comment at its own call site).
+    // chronicle unable to describe a famine visually -- and the vehicle
+    // for every shortfall tick's unrest reaction AND deathsCarry write,
+    // whether or not this tick crosses a whole person), famine.starvation
+    // (only once a shortfall's accumulated attrition crosses a whole
+    // person -- see the comment at its own call site).
     const need = mulFx(propFx(p(), 'population'), ECON.CONSUME_PER_POP);
     const dole = propFx(p(), 'dole');
     const fromDole = dole > need ? need : dole;
@@ -105,6 +105,14 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
     const consumed = granary - newGranary;
     const shortfall = remaining > granary ? remaining - granary : FX_ZERO;
     const consumeDeltas: GraphDelta[] = [{ op: 'node.set', id, key: 'granary', value: newGranary }];
+    // Unrest reacts to shortfall on EVERY such tick, independent of
+    // whether a death crossing lands this tick -- exactly the v0.3.1
+    // behavior, deliberately preserved (controller adjudication,
+    // 2026-08-16: the product decision below changed death REPORTING, not
+    // unrest dynamics). Formula unchanged; it now rides on
+    // granary.consumed's deltas rather than famine.starvation's, since it
+    // must fire every shortfall tick and famine.starvation does not.
+    //
     // Deaths accumulator (product decision 2026-08-16: famine deaths are
     // reported in WHOLE PEOPLE, accumulated -- no fractional corpses
     // anywhere player/chronicle-visible, ever again). Attrition math stays
@@ -113,17 +121,19 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
     // and a place that's never gone hungry is the common case, not an
     // error -- the same zero-default idiom as ops.ts's wealthOf) and
     // delta'd like any prop (D14: internal bookkeeping, but it lives on
-    // the graph so replay reproduces it). The write rides on
-    // granary.consumed's own deltas -- the one event in this consumption
-    // pass that already fires every tick attrition can be nonzero, whether
-    // or not THIS tick crosses a whole person -- rather than inventing a
-    // new event type for the sub-death case: a tick that doesn't cross
-    // leaves no famine.starvation trace at all, by design (hunger without
-    // a death is mood/shortfall texture, carried by the channels that
-    // already exist -- granary.consumed's own drain, and the absence of
-    // socialStep's "fed towns cool" relief -- not a new mechanism).
+    // the graph so replay reproduces it). Like unrest above, the write
+    // rides on granary.consumed's own deltas -- the one event in this
+    // consumption pass that already fires every tick attrition can be
+    // nonzero, whether or not THIS tick crosses a whole person -- rather
+    // than inventing a new event type for the sub-death case: a tick that
+    // doesn't cross leaves no famine.starvation trace at all, by design
+    // (hunger without a death is mood/shortfall texture -- carried by
+    // unrest's own reaction above, not a new mechanism).
     let deaths = 0; // whole persons this tick; nonzero only if the carry below crosses FX_ONE
     if (shortfall > 0n) {
+      const unrestDelta = mulFx(divFx(shortfall, need), fx('25'));
+      consumeDeltas.push({ op: 'node.set', id, key: 'unrest', value: clampFx(propFx(p(), 'unrest') + unrestDelta, FX_ZERO, UNREST_MAX) });
+
       const carryProp = p()['deathsCarry'];
       const carryBefore = typeof carryProp === 'bigint' ? carryProp : FX_ZERO;
       const attrition = mulFx(divFx(shortfall, ECON.CONSUME_PER_POP), fx('0.05'));
@@ -135,9 +145,7 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
     g = applyDeltas(g, consumeDeltas);
     em.emit('granary.consumed', { deltas: consumeDeltas, data: { placeId: id, amount: fxToString(consumed) } });
     if (deaths > 0) {
-      const unrestDelta = mulFx(divFx(shortfall, need), fx('25'));
       const famineDeltas: GraphDelta[] = [
-        { op: 'node.set', id, key: 'unrest', value: clampFx(propFx(p(), 'unrest') + unrestDelta, FX_ZERO, UNREST_MAX) },
         { op: 'node.set', id, key: 'population', value: propFx(p(), 'population') - fxFromInt(deaths) },
       ];
       g = applyDeltas(g, famineDeltas);

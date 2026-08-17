@@ -39,13 +39,19 @@ describe('economyStep', () => {
   // This fixture's raw attrition (22.5, see the original comment below)
   // crosses the whole-person threshold on this very first shortfall tick
   // -- carryBefore is 0 (place:thornfield has never gone hungry before),
-  // so carryAfter == attrition == 22.5, well past 1.0 -- so `unrest` is
-  // EXACTLY UNCHANGED from the pre-accumulator pin (same formula, same
-  // tick, same event, still gated on the same shortfall); only
-  // `population`/`deaths` move, from the fractional 22.5 to floor(22.5) =
-  // 22, with the 0.5 remainder now parked in the new `deathsCarry` prop
-  // instead of silently vanishing into a fractional population digit.
-  it('famine: shortfall raises unrest and kills -- in whole people, accumulated', () => {
+  // so carryAfter == attrition == 22.5, well past 1.0 -- so `unrest`'s
+  // FINAL VALUE is EXACTLY UNCHANGED from the pre-accumulator pin (same
+  // formula, same tick, still gated on the same shortfall). Its MECHANISM
+  // did move, though (controller adjudication, 2026-08-16, post-Task-1
+  // review: unrest reacts to shortfall independent of the death crossing,
+  // restoring exact v0.3.1 dynamics -- see src/systems.ts) -- unrest now
+  // rides granary.consumed's deltas, not famine.starvation's, which this
+  // test re-verifies directly below rather than only trusting the final
+  // state. Only `population`/`deaths` move from the pre-accumulator pin,
+  // from the fractional 22.5 to floor(22.5) = 22, with the 0.5 remainder
+  // now parked in the new `deathsCarry` prop instead of silently vanishing
+  // into a fractional population digit.
+  it('famine: shortfall raises unrest and kills -- in whole people, accumulated; unrest decoupled from the death crossing', () => {
     let g0 = setNodeProp(thornfieldGraph(), 'place:thornfield', 'granary', fx('10'));
     const em = makeEmitter(1);
     const g = economyStep(g0, 1, f, em);
@@ -54,11 +60,14 @@ describe('economyStep', () => {
     expect(propFx(p, 'unrest')).toBe(fx('42.5'));    // 20 + 25 * 90/100 -- unchanged, see above
     expect(propFx(p, 'population')).toBe(fx('478')); // 500 - 22 (was 500 - 22.5 pre-accumulator)
     expect(propFx(p, 'deathsCarry')).toBe(fx('0.5')); // 22.5 raw attrition - 22 whole deaths
+    const consumedEv = em.all().find((e) => e.type === 'granary.consumed');
+    expect(consumedEv?.deltas).toContainEqual({ op: 'node.set', id: 'place:thornfield', key: 'unrest', value: fx('42.5') }); // unrest rides HERE now
     const ev = em.all().find((e) => e.type === 'famine.starvation');
     expect(ev).toBeDefined();
     expect(ev?.data['deaths']).toBe(22); // plain integer now, not an fx string (was fx('22.5'))
     expect(typeof ev?.data['deaths']).toBe('number');
     expect(ev?.data['shortfall']).toBe('90'); // shortfall itself stays fx-string, unchanged
+    expect(ev?.deltas).toEqual([{ op: 'node.set', id: 'place:thornfield', key: 'population', value: fx('478') }]); // NOT unrest -- decoupled
   });
   it('winter: liege tribute paid, or defaulted into arrears', () => {
     const em = makeEmitter(3);
@@ -295,6 +304,16 @@ describe('deaths accumulator (whole-person deaths, 2026-08-16)', () => {
   //   t3: carry 0.90->1.35 -> deaths=1, remainder 0.35; population 9->8
   //   t4: carry 0.35->0.75 (rate now 8*0.05=0.40)            (no event)
   //   t5: carry 0.75->1.15 -> deaths=1, remainder 0.15; population 8->7
+  //
+  // unrest is DECOUPLED from the deaths crossing (controller adjudication,
+  // 2026-08-16: the product decision changed death reporting, not unrest
+  // dynamics -- unrest must react on every shortfall tick exactly as
+  // v0.3.1 did, whether or not a death lands). In this fixture shortfall
+  // == need exactly every tick (granary/dole pinned at 0), so
+  // divFx(shortfall, need) == FX_ONE exactly regardless of population,
+  // making unrestDelta a CONSTANT fx('25') every single tick:
+  //   t1: unrest 20->45     t2: 45->70      t3: 70->95
+  //   t4: 95->120, clamped to UNREST_MAX=100   t5: 100->125, clamped to 100
   function staircaseFixture(): WorldGraph {
     let g = setNodeProp(thornfieldGraph(), 'place:thornfield', 'population', fx('9'));
     g = setNodeProp(g, 'place:thornfield', 'granary', fx('0'));
@@ -314,7 +333,7 @@ describe('deaths accumulator (whole-person deaths, 2026-08-16)', () => {
     expect('deathsCarry' in getNode(g, 'place:thornfield').props).toBe(false);
   });
 
-  it('ticks 1-2 accumulate silently (no event even though shortfall > 0); tick 3 crosses into deaths=1 with pop down exactly one and the hand-derived remainder carried; tick 4 stays quiet at the population-adjusted rate; tick 5 crosses again for a second death', () => {
+  it('ticks 1-2 accumulate silently (no famine.starvation even though shortfall > 0 -- but unrest still reacts, decoupled from the death crossing); tick 3 crosses into deaths=1 with pop down exactly one and the hand-derived remainder carried; tick 4 stays quiet on deaths at the population-adjusted rate (unrest keeps climbing regardless); tick 5 crosses again for a second death', () => {
     let g = staircaseFixture();
 
     const em1 = makeEmitter(1);
@@ -322,12 +341,14 @@ describe('deaths accumulator (whole-person deaths, 2026-08-16)', () => {
     expect(em1.all().some((e) => e.type === 'famine.starvation')).toBe(false);
     expect(propFx(getNode(g, 'place:thornfield').props, 'deathsCarry')).toBe(fx('0.45'));
     expect(propFx(getNode(g, 'place:thornfield').props, 'population')).toBe(fx('9'));
+    expect(propFx(getNode(g, 'place:thornfield').props, 'unrest')).toBe(fx('45')); // 20 + 25 -- moves despite NO death this tick
 
     const em2 = makeEmitter(2);
     g = economyStep(g, 2, f, em2);
     expect(em2.all().some((e) => e.type === 'famine.starvation')).toBe(false);
     expect(propFx(getNode(g, 'place:thornfield').props, 'deathsCarry')).toBe(fx('0.9'));
     expect(propFx(getNode(g, 'place:thornfield').props, 'population')).toBe(fx('9'));
+    expect(propFx(getNode(g, 'place:thornfield').props, 'unrest')).toBe(fx('70')); // 45 + 25 -- again, still no death
 
     const em3 = makeEmitter(3);
     g = economyStep(g, 3, f, em3);
@@ -336,14 +357,17 @@ describe('deaths accumulator (whole-person deaths, 2026-08-16)', () => {
     expect(ev3?.data['deaths']).toBe(1);
     expect(typeof ev3?.data['deaths']).toBe('number');
     expect(ev3?.data['shortfall']).toBe('1.8'); // shortfall stays fx-string, unchanged
+    expect(ev3?.deltas).toEqual([{ op: 'node.set', id: 'place:thornfield', key: 'population', value: fx('8') }]); // famine.starvation's OWN deltas: population only, unrest already moved on granary.consumed
     expect(propFx(getNode(g, 'place:thornfield').props, 'population')).toBe(fx('8')); // 9 - 1
     expect(propFx(getNode(g, 'place:thornfield').props, 'deathsCarry')).toBe(fx('0.35')); // 1.35 - 1
+    expect(propFx(getNode(g, 'place:thornfield').props, 'unrest')).toBe(fx('95')); // 70 + 25 -- same formula, a death also happens to land
 
     const em4 = makeEmitter(4);
     g = economyStep(g, 4, f, em4);
     expect(em4.all().some((e) => e.type === 'famine.starvation')).toBe(false);
     expect(propFx(getNode(g, 'place:thornfield').props, 'deathsCarry')).toBe(fx('0.75')); // 0.35 + (8*0.05=0.40)
     expect(propFx(getNode(g, 'place:thornfield').props, 'population')).toBe(fx('8'));
+    expect(propFx(getNode(g, 'place:thornfield').props, 'unrest')).toBe(fx('100')); // 95 + 25 = 120, clamped to UNREST_MAX -- still moves with NO death this tick
 
     const em5 = makeEmitter(5);
     g = economyStep(g, 5, f, em5);
@@ -352,6 +376,7 @@ describe('deaths accumulator (whole-person deaths, 2026-08-16)', () => {
     expect(ev5?.data['deaths']).toBe(1);
     expect(propFx(getNode(g, 'place:thornfield').props, 'population')).toBe(fx('7')); // 8 - 1
     expect(propFx(getNode(g, 'place:thornfield').props, 'deathsCarry')).toBe(fx('0.15')); // 1.15 - 1
+    expect(propFx(getNode(g, 'place:thornfield').props, 'unrest')).toBe(fx('100')); // 100 + 25 = 125, clamped -- already saturated
   });
 
   it('a large single-tick shortfall that pushes the carry two whole persons past its threshold still emits exactly ONE famine.starvation event, with deaths=2 -- not two events', () => {
