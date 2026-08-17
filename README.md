@@ -186,7 +186,11 @@ withinTicks }`. Choosing that option books the named storylet as a
 follow-up in `ReignState.bookings`, due within the stated window — and this
 fires on every path that lands the option's ops, not only a direct attended
 choice: a brief that defaults, or is neglected past the attention cut,
-still books if the option that ends up applying carries `books`. A due,
+still books if the option that ends up applying carries `books`. A
+`TierRule` (v0.4.1) can name the same shape, so a tier transition may book
+its own arrival scene — guaranteed to deal on the first post-transition
+tick instead of competing against however much content the transition
+just grafted in. A due,
 eligible booking force-deals, skipping the novelty lottery entirely, so an
 authored chain lands on schedule instead of competing with the rest of the
 pool. A booking that never becomes eligible within its window lapses
