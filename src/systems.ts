@@ -144,6 +144,14 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
     }
     g = applyDeltas(g, consumeDeltas);
     em.emit('granary.consumed', { deltas: consumeDeltas, data: { placeId: id, amount: fxToString(consumed) } });
+    // Ride-along (T1 review minor): negative population is unreachable
+    // today only because population has a single writer -- this block --
+    // that always subtracts a whole-person count bounded by the carry
+    // invariant above (carryBefore is always < FX_ONE by construction, and
+    // attrition is bounded by this tick's own shortfall, itself bounded by
+    // `need` = population * CONSUME_PER_POP). Any future SECOND writer
+    // (migration, plague, ...) must re-examine this -- the decrement below
+    // does not clamp at zero itself.
     if (deaths > 0) {
       const famineDeltas: GraphDelta[] = [
         { op: 'node.set', id, key: 'population', value: propFx(p(), 'population') - fxFromInt(deaths) },
@@ -191,6 +199,16 @@ export function economyStep(g0: WorldGraph, tick: number, fortune: Fortune, em: 
   // 5. Liege tribute (winter).
   if (tick % 4 === 3) {
     for (const debt of edgesFrom(g, 'inst:crown', 'debt')) {
+      // Renderer-law T2 (debt mechanism, ops.ts): `debt`-typed edges from
+      // inst:crown are no longer exclusively the liege tribute shape --
+      // borrow/repay (ops.ts) now creates/removes `debt` edges of a
+      // DIFFERENT shape (props principal/fee/dueTick/settled/
+      // overdueEmitted, no `duePerYear` at all) to the same edge type, and
+      // edgesFrom() selects on (src, type) alone. Skip anything that isn't
+      // the liege shape -- same discriminator idiom as debtOverdueStep just
+      // below (key on YOUR props) -- or an outstanding borrow surviving
+      // into a winter tick throws here (propFx on a missing prop).
+      if (typeof debt.props['duePerYear'] !== 'bigint') continue;
       const due = propFx(debt.props, 'duePerYear');
       const treasury = propFx(getNode(g, 'inst:crown').props, 'treasury');
       if (treasury >= due) {
@@ -327,5 +345,47 @@ export function fingerprintDecayStep(g0: WorldGraph, tick: number, em: Emitter):
   if (fades.length === 0) return g;
   g = applyDeltas(g, deltas);
   em.emit('fingerprints.faded', { deltas, data: { fades } });
+  return g;
+}
+
+// Renderer-law T2 (debt-mechanism preamble): debt overdue pass. Mirrors
+// fingerprintDecayStep's discipline just above -- deterministic,
+// fortune-free, order-stable iteration (edgesOfType(g, 'debt') is already
+// sorted by edge id, graph.ts's edgeList()), no `parents` (systemic passes
+// are never player-descended, T2's ancestry invariant) -- but DEVIATES on
+// one point: it emits ONE `debt.overdue` event PER newly-overdue edge,
+// not fingerprintDecayStep's single event carrying every fade. Deliberate:
+// content books the collector scene off THIS debt edge specifically (the
+// robust booked-chain idiom -- the borrow option's own op creates the edge
+// the scene later gates on), so each edge's overdue transition needs its
+// own citable event id for becauseOf attribution; bundling every overdue
+// edge into one shared event would hand every gated brief the SAME
+// becauseOf id regardless of which debt actually concerns it.
+//
+// Keys entirely on SHAPE, never on src/dst: reads `settled`/`overdueEmitted`/
+// `dueTick` off each edge's own props and SKIPS any debt edge missing them,
+// rather than assuming every `debt`-typed edge is one of ours. This is
+// load-bearing, not defensive dressing -- thornfieldGraph() carries a
+// pre-existing `debt` edge (inst:crown -> char:liege, props { duePerYear }
+// only) that predates this mechanism entirely; without the guard this pass
+// would throw reading `dueTick` off it. `settled` is created `false` and
+// (per applyOp's 'repay' arm, ops.ts) never flipped to `true` -- repay
+// REMOVES the edge instead -- so `settled !== false` is equivalent to "not
+// one of ours, or already gone," never true for a live debt this mechanism
+// created.
+export function debtOverdueStep(g0: WorldGraph, tick: number, em: Emitter): WorldGraph {
+  let g = g0;
+  for (const edge of edgesOfType(g, 'debt')) {
+    if (edge.props['settled'] !== false) continue; // foreign shape (liege edge), or already gone (repay removes it)
+    if (edge.props['overdueEmitted'] !== false) continue; // already emitted -- emission-once
+    const dueTick = edge.props['dueTick'];
+    if (typeof dueTick !== 'number' || tick <= dueTick) continue;
+    const deltas: GraphDelta[] = [{ op: 'edge.set', id: edge.id, key: 'overdueEmitted', value: true }];
+    g = applyDeltas(g, deltas);
+    em.emit('debt.overdue', {
+      deltas,
+      data: { lenderId: edge.dst, principal: fxToString(propFx(edge.props, 'principal')), fee: fxToString(propFx(edge.props, 'fee')) },
+    });
+  }
   return g;
 }

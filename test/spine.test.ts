@@ -29,6 +29,7 @@ describe('spine vocabularies', () => {
       raise_levy: 'martial', disband_levy: 'martial', send_envoy: 'social', seize: 'martial',
       hold_festival: 'social', record_stance: null,
       vet: 'social', obscure_records: 'social', // Task 9, spec §9
+      borrow: 'econ', repay: 'econ', // Renderer-law T2, debt mechanism
     };
     expect(Object.fromEntries(Object.entries(OP_KINDS).map(([k, d]) => [k, d.domain]))).toEqual(expected);
   });
