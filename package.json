@@ -1,6 +1,6 @@
 {
   "name": "@despotic-realms/engine",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Deterministic governance-simulation core for Despotic Realms. Pure, I/O-free: resolveTick(season, state, decisions, fortune). No LLM in resolution.",
   "license": "MIT",
   "type": "module",

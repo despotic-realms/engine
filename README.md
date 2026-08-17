@@ -40,14 +40,20 @@ src/
   events.ts            chronicle events, graph deltas, emitter
   constants.ts         economy constants
   ops.ts               closed op vocabulary: validate + apply
+  spine.ts             character spine: aptitudes, traits, wants (closed vocabularies)
   decks/thornfield.ts  starter world graph (canonical Tier-1 fixture)
   match.ts             graph pattern DSL + deterministic matcher
   storylet.ts          storylets, decks, deck harness (checkDeck)
   decks/starter.ts     public starter deck
+  bands.ts             execution-quality bands: weights + counter-based draw
+  mediate.ts           mediated execution: gate, willingness, band, riders
   report.ts            seats + biased ledger projections
+  observe.ts           biased observations of executed ops (six precedence rules)
   systems.ts           economy + social steps
   ladder.ts            tier rules + transitions
   scheduler.ts         policy interface, examiner, famine arc
+  arcs.ts              character arcs: restless -> poach bid -> departed/retained
+  calendar.ts          examiner-calendar validation harness (checkDeck analog)
   attribution.ts       computed attribution (causality)
   tick.ts              resolveTick + packet + decisions validation
   replay.ts            runReign / replay / divergence
@@ -195,6 +201,36 @@ else), then due bookings, then player-attributed newly-eligible briefs, then
 world newly-eligible briefs, then the standing pool — with the
 novelty-weighted lottery still deciding ties within whichever stratum is
 being drawn from.
+
+## Whole-person deaths and real debt (v0.4)
+
+Two mechanisms close gaps a renderer-facing review surfaced: famine deaths
+were reaching the chronicle as fractional corpses, and the treasury's only
+notion of "debt" was a fixed liege tribute with no borrowing behind it.
+
+**Deaths, in whole people** — famine attrition is still computed
+continuously per place, but is no longer reported as it lands: each
+place's raw attrition accumulates in a non-visible `deathsCarry`
+fixed-point prop, and only once that carry crosses a whole person does
+`famine.starvation` fire — `deaths` an integer, population decremented by
+exactly that count, and the fractional remainder held in the carry for the
+next tick. A shortfall tick that doesn't cross a person emits no
+starvation event at all: hunger without a death is unrest texture, never a
+death report.
+
+**Real debt** — `borrow` opens a `debt` edge from the crown to a lender
+(character or institution), carrying `principal`, `fee`, `dueTick`, and
+`settled`/`overdueEmitted` bookkeeping flags, and credits the treasury at
+once; `repay` debits principal plus fee in full and removes the edge
+outright, so settlement is the edge's disappearance, never a flag flip —
+the same lender can be borrowed from again cleanly afterward. A
+deterministic, fortune-free systems pass marks a debt overdue the tick
+after its due tick passes — once — emitting `debt.overdue`; the engine
+charges no penalty of its own, leaving collection for content to
+dramatize, typically by booking a follow-up scene off the very edge the
+loan created. The deed vocabulary grows from sixteen entries to eighteen:
+`borrowed` and `repaid` join the closed set, decaying on the same
+fingerprint clock as the rest.
 
 ## What a host adds
 
