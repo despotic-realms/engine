@@ -344,7 +344,16 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
       if (OBSCURE_RECORDS_COST > t) return { ok: false, error: 'treasury cannot afford counter-intelligence' };
       break;
     case 'borrow': {
-      const lender = getNode(g, op['lenderId'] as string);
+      const lenderId = op['lenderId'] as string;
+      // Review finding (post-approval): inst:crown is type 'institution',
+      // so it passes the character-or-institution check below, and no
+      // self-loop debt edge exists on a fresh graph, so it passes the
+      // existing-debt check too -- without this, a self-loan validated
+      // cleanly and was reachable via directive input, inflating treasury
+      // with no real counterparty. Mirrors imprison's own self-target
+      // precedent above ('the crown cannot imprison itself').
+      if (lenderId === 'inst:crown') return { ok: false, error: 'the crown cannot borrow from itself' };
+      const lender = getNode(g, lenderId);
       if (lender.type !== 'character' && lender.type !== 'institution')
         return { ok: false, error: 'lender must be a character or institution' };
       // Keys on `settled` (this shape's discriminator, per the debt-
@@ -360,7 +369,7 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
       // second addEdge to the same lender would throw a collision error in
       // applyOp regardless -- this turns that crash into an honest
       // validation rejection instead.
-      const existing = findEdge(g, 'debt', 'inst:crown', op['lenderId'] as string);
+      const existing = findEdge(g, 'debt', 'inst:crown', lenderId);
       if (existing && existing.props['settled'] !== true) return { ok: false, error: 'already indebted to that lender' };
       break;
     }
@@ -816,7 +825,9 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, seatId
       const eid = edgeId('debt', 'inst:crown', op.lenderId);
       const existing = findEdge(g, 'debt', 'inst:crown', op.lenderId);
       if (!existing) throw new Error('applyOp: repay with no debt edge (validate first)');
-      const total = propFx(existing.props, 'principal') + propFx(existing.props, 'fee');
+      const principal = propFx(existing.props, 'principal');
+      const fee = propFx(existing.props, 'fee');
+      const total = principal + fee;
       const deltas: GraphDelta[] = [
         { op: 'node.set', id: 'inst:crown', key: 'treasury', value: treasury(g) - total },
         // Settlement IS the edge's removal, never a `settled: true` flip
@@ -828,7 +839,13 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, seatId
         ...stampDeed(op.lenderId, 'repaid', seatId, tick),
       ];
       const g2 = applyDeltas(g, deltas);
-      em.emit('op.repay', { parents, data: { ...op }, deltas });
+      // Review addition (post-approval): an edge.remove delta carries no
+      // prop snapshot -- principal/fee are gone from the graph the instant
+      // this event lands, so without spreading them into data they'd be
+      // unrecoverable from the chronicle alone. Mirrors op.audit's own
+      // computed-data precedent (found/skimmed/holder spread alongside
+      // {...op} above).
+      em.emit('op.repay', { parents, data: { ...op, principal: fxToString(principal), fee: fxToString(fee), total: fxToString(total) }, deltas });
       return g2;
     }
   }

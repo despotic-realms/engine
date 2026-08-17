@@ -107,6 +107,18 @@ describe('validateOp: borrow', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe('already indebted to that lender');
   });
+  // Review finding (post-approval, before release): inst:crown is type
+  // 'institution', so it passed the character-or-institution check, and no
+  // debt edge from the crown to itself exists on a fresh graph, so it
+  // passed the existing-debt check too -- a self-loan validated cleanly and
+  // was reachable via directive input, inflating treasury with no real
+  // counterparty. Mirrors imprison's self-target precedent (ops.ts,
+  // 'the crown cannot imprison itself').
+  it('rejects lenderId === inst:crown -- the crown cannot borrow from itself', () => {
+    const r = validateOp(debtGraph(), { kind: 'borrow', lenderId: 'inst:crown', amount: '80', fee: '10', dueTicks: 5 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('the crown cannot borrow from itself');
+  });
 });
 
 describe('validateOp: repay', () => {
@@ -191,6 +203,20 @@ describe('applyOp: repay', () => {
     expect(getNode(g, 'char:vane').props['recent:repaid:at']).toBe(6);
     const ev = em.all().find((e) => e.type === 'op.repay')!;
     expect(ev.deltas).toHaveLength(4); // treasury debit + edge.remove + 2 stamp deltas
+  });
+  // Review addition (post-approval, before release): edge.remove deltas
+  // carry no prop snapshot -- the debt edge's principal/fee are gone from
+  // the graph the instant this event lands, so without this the figures
+  // are unrecoverable from the chronicle alone. Mirrors op.audit's
+  // computed-data precedent (found/skimmed/holder spread alongside {...op}).
+  it("chronicles principal, fee, and total as fx strings on op.repay's data (the edge.remove delta itself carries no prop snapshot)", () => {
+    const g1 = indebted(5); // borrowed amount '80', fee '10'
+    const em = makeEmitter(6);
+    applyOp(g1, ok(g1, { kind: 'repay', lenderId: 'char:vane' }), 6, em, SEAT);
+    const ev = em.all().find((e) => e.type === 'op.repay')!;
+    expect(ev.data['principal']).toBe('80');
+    expect(ev.data['fee']).toBe('10');
+    expect(ev.data['total']).toBe('90');
   });
   it("replay-equivalence: op.repay's deltas replay to the same graph applyOp produced (D14)", () => {
     const g1 = indebted(5);
