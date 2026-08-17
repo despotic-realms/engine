@@ -35,11 +35,24 @@ export type Op =
   | { kind: 'hold_festival'; placeId: string; amount: string }
   | { kind: 'record_stance'; stanceId: string; value: 'for' | 'against' }
   | { kind: 'vet'; charId: string }
-  | { kind: 'obscure_records' };
+  | { kind: 'obscure_records' }
+  // Renderer-law T2 (debt-mechanism preamble): a loan is a `debt` edge src
+  // inst:crown -> dst lender, distinct in SHAPE from the pre-existing liege
+  // tribute `debt` edge (thornfield.ts, props { duePerYear } only -- see
+  // DEEDS below and systems.ts's debtOverdueStep for how the two shapes
+  // coexist without either ever reading/writing the other's props).
+  | { kind: 'borrow'; lenderId: string; amount: string; fee: string; dueTicks: number }
+  | { kind: 'repay'; lenderId: string };
 
 export interface OpParamDesc {
   name: string;
-  type: 'nodeId' | 'fx' | 'int' | 'enum' | 'stanceId';
+  // 'fxNonNeg' differs from 'fx' only at the floor: 'fx' (parseAmount)
+  // requires strictly positive ("amount must be positive" -- every prior Fx
+  // param is a spend/grant/size that a zero value would make meaningless);
+  // 'fxNonNeg' (parseNonNegAmount) allows exactly zero, rejecting only
+  // negative -- borrow's `fee` is the first Fx param a legitimate zero
+  // value (an interest-free loan) makes sense for.
+  type: 'nodeId' | 'fx' | 'fxNonNeg' | 'int' | 'enum' | 'stanceId';
   nodeType?: NodeType;
   min?: number;
   max?: number;
@@ -166,6 +179,21 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
     params: [],
     domain: 'social',
   },
+  borrow: {
+    summary: 'Borrow from a lender: treasury gains the amount now; a debt obligation is recorded, due in dueTicks ticks.',
+    params: [
+      { name: 'lenderId', type: 'nodeId' },
+      { name: 'amount', type: 'fx' },
+      { name: 'fee', type: 'fxNonNeg' },
+      { name: 'dueTicks', type: 'int', min: 1 },
+    ],
+    domain: 'econ',
+  },
+  repay: {
+    summary: 'Repay an outstanding debt to a lender in full (principal + fee); the debt obligation is cleared.',
+    params: [{ name: 'lenderId', type: 'nodeId' }],
+    domain: 'econ',
+  },
 };
 
 export type OpResult = { ok: true; op: Op } | { ok: false; error: string };
@@ -175,6 +203,19 @@ function parseAmount(v: unknown): Fx | string {
   try {
     const a = fx(v);
     return a <= 0n ? 'amount must be positive' : a;
+  } catch {
+    return `bad amount '${v}'`;
+  }
+}
+
+// The 'fxNonNeg' counterpart to parseAmount above: same shape parse, but
+// floors at zero INCLUSIVE rather than requiring strict positivity --
+// borrow's `fee` may be exactly '0' (an interest-free loan).
+function parseNonNegAmount(v: unknown): Fx | string {
+  if (typeof v !== 'string') return 'amount must be a decimal string';
+  try {
+    const a = fx(v);
+    return a < 0n ? 'amount must not be negative' : a;
   } catch {
     return `bad amount '${v}'`;
   }
@@ -228,6 +269,9 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
         return { ok: false, error: `'${p.name}' out of range` };
     } else if (p.type === 'fx') {
       const a = parseAmount(v);
+      if (typeof a === 'string') return { ok: false, error: a };
+    } else if (p.type === 'fxNonNeg') {
+      const a = parseNonNegAmount(v);
       if (typeof a === 'string') return { ok: false, error: a };
     } else if (p.type === 'enum') {
       if (typeof v !== 'string' || !p.values?.includes(v)) return { ok: false, error: `bad '${p.name}'` };
@@ -299,6 +343,48 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
     case 'obscure_records':
       if (OBSCURE_RECORDS_COST > t) return { ok: false, error: 'treasury cannot afford counter-intelligence' };
       break;
+    case 'borrow': {
+      const lenderId = op['lenderId'] as string;
+      // Review finding (post-approval): inst:crown is type 'institution',
+      // so it passes the character-or-institution check below, and no
+      // self-loop debt edge exists on a fresh graph, so it passes the
+      // existing-debt check too -- without this, a self-loan validated
+      // cleanly and was reachable via directive input, inflating treasury
+      // with no real counterparty. Mirrors imprison's own self-target
+      // precedent above ('the crown cannot imprison itself').
+      if (lenderId === 'inst:crown') return { ok: false, error: 'the crown cannot borrow from itself' };
+      const lender = getNode(g, lenderId);
+      if (lender.type !== 'character' && lender.type !== 'institution')
+        return { ok: false, error: 'lender must be a character or institution' };
+      // Keys on `settled` (this shape's discriminator, per the debt-
+      // mechanism preamble) rather than bare existence -- but `settled` is
+      // created `false` and repay REMOVES the edge rather than ever
+      // flipping it to `true` (see applyOp's 'repay' arm below), so no LIVE
+      // debt edge can ever read settled === true: this rejects on ANY
+      // existing debt edge to this lender, ours (settled: false, an
+      // outstanding loan) or the pre-existing liege tribute edge
+      // (thornfield.ts -- a different shape, no `settled` prop at all, so
+      // `!== true` catches it too). That second case isn't just
+      // belt-and-braces: edgeId() is keyed on (type, src, dst) alone, so a
+      // second addEdge to the same lender would throw a collision error in
+      // applyOp regardless -- this turns that crash into an honest
+      // validation rejection instead.
+      const existing = findEdge(g, 'debt', 'inst:crown', lenderId);
+      if (existing && existing.props['settled'] !== true) return { ok: false, error: 'already indebted to that lender' };
+      break;
+    }
+    case 'repay': {
+      const existing = findEdge(g, 'debt', 'inst:crown', op['lenderId'] as string);
+      // Same settled-keyed discriminator as borrow above, from the other
+      // side: a missing edge, or one lacking OUR `settled` prop entirely
+      // (the liege edge), both read as "nothing of ours to repay" here --
+      // never a thrown error, and never a read of `principal`/`fee` off a
+      // props bag that doesn't carry them.
+      if (!existing || existing.props['settled'] !== false) return { ok: false, error: 'no unsettled debt to that lender' };
+      const total = propFx(existing.props, 'principal') + propFx(existing.props, 'fee');
+      if (total > t) return { ok: false, error: 'treasury cannot afford to repay that debt' };
+      break;
+    }
   }
   return { ok: true, op: op as unknown as Op };
 }
@@ -329,6 +415,8 @@ export const DEED_NAMES = [
   'granted', 'seized', 'envoy-warm', 'envoy-firm', 'envoy-hard', 'audited',
   'appointed', 'imprisoned', 'pardoned', 'vetted',
   'festival', 'invested', 'grain-released', 'grain-bought', 'levy-raised', 'taxed',
+  // Renderer-law T2 (debt mechanism): extends the closed set from 16 to 18.
+  'borrowed', 'repaid',
 ] as const;
 export type Deed = (typeof DEED_NAMES)[number];
 
@@ -357,6 +445,8 @@ export const DEEDS: Partial<Record<Exclude<Op['kind'], 'send_envoy'>, Deed>> = {
   stockpile_grain: 'grain-bought',
   raise_levy: 'levy-raised',
   decree_tax: 'taxed',
+  borrow: 'borrowed',
+  repay: 'repaid',
 };
 
 export const ENVOY_DEED: Record<'conciliatory' | 'firm' | 'threatening', Deed> = {
@@ -707,6 +797,55 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, seatId
       ];
       const g2 = applyDeltas(g, deltas);
       em.emit('op.obscure_records', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'borrow': {
+      const amount = fx(op.amount);
+      const fee = fx(op.fee);
+      const deltas: GraphDelta[] = [
+        // Credits the crown -- mirrors seize's symmetric credit (ops.ts's
+        // only other treasury INFLOW); debitTreasury exists for the
+        // opposite direction only, so this writes the node.set directly.
+        { op: 'node.set', id: 'inst:crown', key: 'treasury', value: treasury(g) + amount },
+        {
+          op: 'edge.add',
+          edge: {
+            id: edgeId('debt', 'inst:crown', op.lenderId),
+            type: 'debt', src: 'inst:crown', dst: op.lenderId,
+            props: { principal: amount, fee, dueTick: tick + op.dueTicks, settled: false, overdueEmitted: false },
+          },
+        },
+        ...stampDeed(op.lenderId, 'borrowed', seatId, tick),
+      ];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.borrow', { parents, data: { ...op }, deltas });
+      return g2;
+    }
+    case 'repay': {
+      const eid = edgeId('debt', 'inst:crown', op.lenderId);
+      const existing = findEdge(g, 'debt', 'inst:crown', op.lenderId);
+      if (!existing) throw new Error('applyOp: repay with no debt edge (validate first)');
+      const principal = propFx(existing.props, 'principal');
+      const fee = propFx(existing.props, 'fee');
+      const total = principal + fee;
+      const deltas: GraphDelta[] = [
+        { op: 'node.set', id: 'inst:crown', key: 'treasury', value: treasury(g) - total },
+        // Settlement IS the edge's removal, never a `settled: true` flip
+        // (debt-mechanism preamble) -- so the same lender can be borrowed
+        // from again later with a clean edgeId(), and the overdue pass
+        // (systems.ts) never has to consider a "settled but still present"
+        // state at all.
+        { op: 'edge.remove', id: eid },
+        ...stampDeed(op.lenderId, 'repaid', seatId, tick),
+      ];
+      const g2 = applyDeltas(g, deltas);
+      // Review addition (post-approval): an edge.remove delta carries no
+      // prop snapshot -- principal/fee are gone from the graph the instant
+      // this event lands, so without spreading them into data they'd be
+      // unrecoverable from the chronicle alone. Mirrors op.audit's own
+      // computed-data precedent (found/skimmed/holder spread alongside
+      // {...op} above).
+      em.emit('op.repay', { parents, data: { ...op, principal: fxToString(principal), fee: fxToString(fee), total: fxToString(total) }, deltas });
       return g2;
     }
   }

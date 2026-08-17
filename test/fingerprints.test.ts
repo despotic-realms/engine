@@ -6,10 +6,14 @@
 // bundle (D14). A deterministic decay pass (systems.ts, adjacent to
 // socialStep) clears both once `tick - at > FINGERPRINT_TICKS`.
 //
-// Table-driven over the closed 16-deed vocabulary (DEED_NAMES, src/ops.ts):
+// Table-driven over the closed deed vocabulary (DEED_NAMES, src/ops.ts):
 // this file imports that table directly rather than re-typing the deed
 // strings, so the test suite and the production closed set can never drift
-// apart silently.
+// apart silently. Started at 16 deeds (causality wave); renderer-law T2
+// (2026-08-16, debt mechanism) extends it to 18 with 'borrowed'/'repaid' --
+// see DIRECT_CASES and the dedicated 'repaid' case below (repaid needs a
+// pre-borrowed target, the same reason 'pardoned' needs a pre-imprisoned
+// one).
 import { describe, expect, it } from 'vitest';
 import { hashValue } from '../src/canon.js';
 import { fx } from '../src/fx.js';
@@ -41,8 +45,11 @@ function baseGraph(): WorldGraph {
 }
 
 // One fixture per deed: (op, targetId) against baseGraph(), EXCEPT 'pardoned'
-// (needs a pre-imprisoned target -- built separately below) and the three
-// envoy deeds (need op.tone bound explicitly, not derivable from DEEDS).
+// (needs a pre-imprisoned target -- built separately below), 'repaid' (needs
+// a pre-borrowed target -- same reason, built separately below), and the
+// three envoy deeds (need op.tone bound explicitly, not derivable from
+// DEEDS). 'borrowed' needs no pre-state (a fresh lender, same as 'granted'
+// et al.), so it fits this table directly.
 const DIRECT_CASES: Array<[Deed, Op, string]> = [
   ['granted', { kind: 'grant', charId: 'char:vane', amount: '10' }, 'char:vane'],
   ['seized', { kind: 'seize', charId: 'char:maud', amount: '50' }, 'char:maud'],
@@ -56,6 +63,7 @@ const DIRECT_CASES: Array<[Deed, Op, string]> = [
   ['grain-bought', { kind: 'stockpile_grain', placeId: 'place:thornfield', amount: '40' }, 'place:thornfield'],
   ['levy-raised', { kind: 'raise_levy', placeId: 'place:thornfield', size: '50' }, 'place:thornfield'],
   ['taxed', { kind: 'decree_tax', placeId: 'place:thornfield', rateBp: 1500 }, 'place:thornfield'],
+  ['borrowed', { kind: 'borrow', lenderId: 'char:vane', amount: '50', fee: '5', dueTicks: 4 }, 'char:vane'],
 ];
 
 const ENVOY_CASES: Array<[Deed, 'conciliatory' | 'firm' | 'threatening']> = [
@@ -64,9 +72,9 @@ const ENVOY_CASES: Array<[Deed, 'conciliatory' | 'firm' | 'threatening']> = [
   ['envoy-hard', 'threatening'],
 ];
 
-describe('deed fingerprints: DEEDS/ENVOY_DEED cover the closed 16-deed set exactly (causality §2)', () => {
+describe('deed fingerprints: DEEDS/ENVOY_DEED cover the closed 18-deed set exactly (causality §2 + renderer-law T2)', () => {
   it('DIRECT_CASES + ENVOY_CASES together name every DEED_NAMES entry, once each', () => {
-    const covered = [...DIRECT_CASES.map((c) => c[0]), 'pardoned' as Deed, ...ENVOY_CASES.map((c) => c[0])];
+    const covered = [...DIRECT_CASES.map((c) => c[0]), 'pardoned' as Deed, 'repaid' as Deed, ...ENVOY_CASES.map((c) => c[0])];
     expect(covered.slice().sort()).toEqual([...DEED_NAMES].sort());
     expect(new Set(covered).size).toBe(DEED_NAMES.length); // no duplicates
   });
@@ -75,9 +83,13 @@ describe('deed fingerprints: DEEDS/ENVOY_DEED cover the closed 16-deed set exact
     const fromTables = [...Object.values(DEEDS), ...Object.values(ENVOY_DEED)];
     expect(fromTables.slice().sort()).toEqual([...DEED_NAMES].sort());
   });
+
+  it('the closed set is exactly 18 deeds (16 causality-wave + borrowed + repaid)', () => {
+    expect(DEED_NAMES.length).toBe(18);
+  });
 });
 
-describe('deed fingerprints: table-driven over all 16 deeds (causality §2)', () => {
+describe('deed fingerprints: table-driven over all 18 deeds (causality §2 + renderer-law T2)', () => {
   it.each(DIRECT_CASES)('%s: stamps recent:%s = seat, recent:%s:at = tick on the target, inside the op\'s own delta bundle', (deed, op, targetId) => {
     const g0 = baseGraph();
     const r = validateOp(g0, op);
@@ -148,6 +160,29 @@ describe('deed fingerprints: table-driven over all 16 deeds (causality §2)', ()
     expect(getNode(g, 'char:vane').props['recent:pardoned:at']).toBe(tick);
     const ev = em.all().find((e) => e.type === 'op.pardon')!;
     const replayed = applyDeltas(imprisoned, ev.deltas);
+    expect(hashValue(replayed)).toBe(hashValue(g));
+  });
+
+  // Renderer-law T2: 'repaid' mirrors 'pardoned' immediately above -- it
+  // needs pre-state (an unsettled debt to repay) that a fresh baseGraph()
+  // doesn't carry, so it's built here rather than folded into DIRECT_CASES.
+  it('repaid: stamps on the lender, which must already carry an unsettled debt to validate', () => {
+    const g0 = baseGraph();
+    const emBorrow = makeEmitter(3);
+    const rBorrow = validateOp(g0, { kind: 'borrow', lenderId: 'char:vane', amount: '50', fee: '5', dueTicks: 4 });
+    if (!rBorrow.ok) throw new Error(rBorrow.error);
+    const indebted = applyOp(g0, rBorrow.op, 3, emBorrow, SEAT);
+
+    const tick = 5;
+    const em = makeEmitter(tick);
+    const r = validateOp(indebted, { kind: 'repay', lenderId: 'char:vane' });
+    if (!r.ok) throw new Error(r.error);
+    const g = applyOp(indebted, r.op, tick, em, SEAT);
+
+    expect(getNode(g, 'char:vane').props['recent:repaid']).toBe(SEAT);
+    expect(getNode(g, 'char:vane').props['recent:repaid:at']).toBe(tick);
+    const ev = em.all().find((e) => e.type === 'op.repay')!;
+    const replayed = applyDeltas(indebted, ev.deltas);
     expect(hashValue(replayed)).toBe(hashValue(g));
   });
 });
@@ -333,6 +368,46 @@ describe('deed fingerprint decay (causality §2: FINGERPRINT_TICKS = 3)', () => 
     const b = fingerprintDecayStep(stamped, 10, emB);
     expect(hashValue(a)).toBe(hashValue(b));
     expect(emA.all()).toEqual(emB.all());
+  });
+
+  // Renderer-law T2: decay is table-driven over DEED_NAMES (systems.ts's
+  // fingerprintDecayStep loops `for (const deed of DEED_NAMES)`), so the two
+  // new deeds should be covered for free -- this proves that rather than
+  // assuming it, per the task brief. One pass covers both: 'borrowed' on
+  // char:vane (a fresh borrow) and 'repaid' on char:maud (borrow then repay,
+  // reusing maud's pre-existing `wealth` fixture prop for nothing in
+  // particular -- just a second, independent node so the two stamps don't
+  // collide).
+  it('decay covers both new deeds (borrowed/repaid) exactly like the closed 16', () => {
+    let g = baseGraph();
+    const stampTick = 1;
+    const emBorrow1 = makeEmitter(stampTick);
+    const rBorrow1 = validateOp(g, { kind: 'borrow', lenderId: 'char:vane', amount: '50', fee: '5', dueTicks: 4 });
+    if (!rBorrow1.ok) throw new Error(rBorrow1.error);
+    g = applyOp(g, rBorrow1.op, stampTick, emBorrow1, SEAT); // char:vane: recent:borrowed
+
+    const rBorrow2 = validateOp(g, { kind: 'borrow', lenderId: 'char:maud', amount: '30', fee: '3', dueTicks: 4 });
+    if (!rBorrow2.ok) throw new Error(rBorrow2.error);
+    g = applyOp(g, rBorrow2.op, stampTick, makeEmitter(stampTick), SEAT);
+    const rRepay = validateOp(g, { kind: 'repay', lenderId: 'char:maud' });
+    if (!rRepay.ok) throw new Error(rRepay.error);
+    g = applyOp(g, rRepay.op, stampTick, makeEmitter(stampTick), SEAT); // char:maud: recent:repaid
+
+    expect(getNode(g, 'char:vane').props['recent:borrowed']).toBe(SEAT);
+    expect(getNode(g, 'char:maud').props['recent:repaid']).toBe(SEAT);
+
+    const fadeTick = stampTick + FINGERPRINT_TICKS + 1;
+    const em = makeEmitter(fadeTick);
+    const faded = fingerprintDecayStep(g, fadeTick, em);
+
+    expect(getNode(faded, 'char:vane').props['recent:borrowed']).toBe('');
+    expect(getNode(faded, 'char:vane').props['recent:borrowed:at']).toBe(-1);
+    expect(getNode(faded, 'char:maud').props['recent:repaid']).toBe('');
+    expect(getNode(faded, 'char:maud').props['recent:repaid:at']).toBe(-1);
+
+    const fades = em.all().find((e) => e.type === 'fingerprints.faded')?.data['fades'] as Array<{ nodeId: string; deed: string }>;
+    expect(fades).toContainEqual({ nodeId: 'char:vane', deed: 'borrowed', seatId: SEAT, at: stampTick });
+    expect(fades).toContainEqual({ nodeId: 'char:maud', deed: 'repaid', seatId: SEAT, at: stampTick });
   });
 });
 

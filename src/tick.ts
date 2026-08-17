@@ -30,7 +30,7 @@ import type { Band, WantKey } from './spine.js';
 import { WANT_FULFILL, currentWant } from './spine.js';
 import type { Deck, Storylet, StoryletOption } from './storylet.js';
 import { bindOps, eligibleStorylets, possibleStorylets, renderTpl } from './storylet.js';
-import { economyStep, fingerprintDecayStep, socialStep } from './systems.js';
+import { debtOverdueStep, economyStep, fingerprintDecayStep, socialStep } from './systems.js';
 
 export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number; mediation?: MediationConfig }
 
@@ -478,6 +478,11 @@ export function resolveTick(
   // ordering only affects which of this tick's events sort first, never the
   // outcome.
   g = fingerprintDecayStep(g, tick, em);
+  // Renderer-law T2: debt overdue pass, adjacent to fingerprintDecayStep for
+  // the same reason -- debt-edge props are disjoint from recent:<deed>
+  // props (and from everything else this tick touches by this point), so
+  // ordering only affects which of this tick's events sort first.
+  g = debtOverdueStep(g, tick, em);
   g = advanceArcs(g, tick, season.calendar, em);
   // T8 (spec §5): character arcs generalize the famine machinery just
   // above to people -- same tick-driven systems step, same delta-native
