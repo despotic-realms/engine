@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { hashValue } from '../src/canon.js';
 import { fx } from '../src/fx.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
-import { edgesTo, findEdge, getNode, propFx, setEdgeProp, setNodeProp } from '../src/graph.js';
+import { addEdge, addNode, edgesTo, findEdge, getNode, propFx, setEdgeProp, setNodeProp } from '../src/graph.js';
 import { socialStep } from '../src/systems.js';
 import { applyTransition, checkLadder } from '../src/ladder.js';
 import { thornfieldGraph } from '../src/decks/thornfield.js';
 import type { TierRule } from '../src/ladder.js';
+import type { WorldGraph } from '../src/graph.js';
 
 const INTEREST = 'interest:char:osric->inst:crown';
 const LOYALTY_OSRIC = 'loyalty:char:osric->char:ruler';
@@ -174,5 +175,143 @@ describe('TierRule.effects (graft on transition)', () => {
     expect(removeIdx).toBeGreaterThanOrEqual(0);
     expect(inExileIdx).toBeGreaterThan(removeIdx);
     expect(graftIdx).toBeGreaterThan(inExileIdx); // effects compose AFTER the demote-vacate logic, observable in delta order
+  });
+});
+
+// v0.5.1 fix (reviewer-reproduced defect, Critical): the demote-to-0 branch
+// above used to vacate EVERY appointment edge in the graph, with no regard
+// for who holds it or whether the crown was even falling at all. Two proven
+// consequences, both fixed by this same scoping:
+//  (a) a SELF-transition (rule.from === rule.to === 0 -- content's real
+//      shape for a routed march, e.g. despotic-realms/content's
+//      `{ from: 0, to: 0, kind: 'demote', note: 'routed' }`, reached only
+//      via a decisive flashpoint's `demoteOnRoutTo: 0`) still matched
+//      `rule.kind === 'demote' && rule.to === 0`, even though the crown's
+//      tier never changes on a self-transition -- nothing was actually
+//      "falling." A failed attempt to unseat a rival stripped the RIVAL'S
+//      OWN office anyway. In content, the claim campaign's own opposition
+//      weight for the next attempt reads that exact appointment edge's
+//      existence (worlds/tier0.ts's CLAIM_FLASHPOINTS: `{ edgeType:
+//      'appointment', src: 'char:usurper', dst: 'office:high-seat' }`), so
+//      the WORST outcome (rout) silently made the rival look weaker on the
+//      retry (opposition 0) instead of unchanged (opposition 700) --
+//      inverted difficulty.
+//  (b) even on a genuine fall (1->0, 2->0), the loop removed EVERY
+//      appointment edge indiscriminately -- including a rival's own
+//      appointment to their own office, never granted by the falling ruler
+//      and never the falling ruler's to lose. Once removed, content cannot
+//      repair it after the fact: the effects loop just below drops any
+//      edge.add whose id already exists in g0 -- exactly the id this
+//      branch just orphaned -- so a content-authored graft meant to
+//      re-seat the rival is silently dropped, not applied, regardless of
+//      ordering.
+//
+// INVESTIGATION FINDING (this task, both rows below prove it directly): (b)
+// is not hypothetical. despotic-realms/content's real worlds seat a rival
+// in their own office via a genesis or first-fall appointment edge
+// (src/worlds/tier0.ts's base(): `char:usurper -> office:high-seat`) that
+// SURVIVES every promotion (the vacate branch only ever fires on
+// rule.kind==='demote', so no promote rule -- including "the return",
+// 0->1 -- ever touches it). Once that edge is sitting in a live graph, ANY
+// subsequent real demotion to tier 0 vacates it exactly like any other
+// appointment, with no special-casing at all -- proven below by
+// constructing that exact shape (a rival already holding their own office
+// alongside the crown's own court) and running a real 1->0/2->0 transition
+// against it, unmodified from how the pre-fix code actually behaved. This
+// was live ever since content first seated a rival this way, not a
+// self-transition-only bug.
+//
+// FIX: the vacate loop now skips any appointment edge whose HOLDER is
+// `rivalId` (SeasonConfig.rivalId, tick.ts -- threaded through from
+// resolveTick's ladder step exactly like advanceCharacterArcs already
+// receives the same field), and the whole branch is scoped to
+// `rule.from !== rule.to` so a self-transition can never enter it. This is
+// the smallest discriminator the graph actually offers: an appointment
+// edge carries no record of WHO or WHAT granted it (only `since`), so "is
+// this the falling ruler's own court" cannot be read off the edge
+// directly -- but "is this character the season's designated rival" is
+// already a first-class (if optional) fact SeasonConfig carries for
+// exactly this kind of external-actor scoping.
+//
+// DOCUMENTED LIMIT: this protects exactly one named character. A season
+// that never sets rivalId gets the pre-fix behavior for whatever office an
+// unnamed rival might hold (despotic-realms/content's src/slice0.ts
+// already sets `rivalId: 'char:usurper'`; any other season config that
+// seats a rival in an office and wants this protection must set it too --
+// a content-side follow-up, not this engine's). A cast with several
+// independent external power-holders would need a different mechanism;
+// this fix covers exactly the one-rival shape every real season config
+// authors today. See the last test below, which pins this limit
+// deliberately rather than leaving it merely implied.
+describe('applyTransition: exile vacate is scoped, not blanket (v0.5.1)', () => {
+  // Mirrors despotic-realms/content's real shape closely enough to
+  // reproduce the defect precisely (src/worlds/tier0.ts's base(): a rival
+  // character permanently appointed to their own office, alongside the
+  // crown's own court, e.g. thornfieldGraph()'s office:steward <-
+  // char:osric) -- without importing content itself, which the engine must
+  // never depend on.
+  function graphWithRival(): WorldGraph {
+    let g: WorldGraph = thornfieldGraph();
+    g = addNode(g, { id: 'char:usurper', type: 'character', props: { name: 'the Usurper' } });
+    g = addNode(g, { id: 'office:high-seat', type: 'office', props: { title: 'the High Seat' } });
+    g = addEdge(g, { type: 'appointment', src: 'char:usurper', dst: 'office:high-seat', props: { since: 0 } });
+    return g;
+  }
+  const ROUTED: TierRule = { from: 0, to: 0, kind: 'demote', note: 'routed' }; // content's real self-transition shape
+  const COUP_1_TO_0: TierRule = { from: 1, to: 0, kind: 'demote', note: 'coup' };
+  const COUP_2_TO_0: TierRule = { from: 2, to: 0, kind: 'demote', note: 'coup' };
+
+  it('(i) a tier-0 -> tier-0 self-transition vacates NOTHING -- no court is lost in a failed march', () => {
+    const em = makeEmitter(3);
+    const g = applyTransition(graphWithRival(), ROUTED, 3, em, 'char:usurper');
+    expect(edgesTo(g, 'office:steward', 'appointment')).toHaveLength(1); // the crown's own court: untouched
+    expect(edgesTo(g, 'office:high-seat', 'appointment')).toHaveLength(1); // the rival's seat: untouched
+    expect(getNode(g, 'inst:crown').props['inExile']).toBeUndefined(); // no redundant re-flag -- this was never a real fall
+    expect(em.all()[0]?.deltas).toEqual([]); // zero deltas: truly nothing happened
+  });
+
+  it("(ii) a real demotion (1->0) still vacates the RULER'S OWN court -- unchanged design intent, regression guard", () => {
+    const em = makeEmitter(3);
+    const g = applyTransition(graphWithRival(), COUP_1_TO_0, 3, em, 'char:usurper');
+    expect(edgesTo(g, 'office:steward', 'appointment')).toHaveLength(0); // Osric's stewardship: vacated, as designed
+    expect(getNode(g, 'inst:crown').props['inExile']).toBe(true);
+  });
+
+  it("(iii) the rival's own appointment survives a real demotion (1->0) when rivalId names them -- this is the fix", () => {
+    const em = makeEmitter(3);
+    const g = applyTransition(graphWithRival(), COUP_1_TO_0, 3, em, 'char:usurper');
+    expect(edgesTo(g, 'office:high-seat', 'appointment')).toHaveLength(1);
+    expect(findEdge(g, 'appointment', 'char:usurper', 'office:high-seat')).toBeDefined();
+  });
+
+  it("(iii cont.) the rival's appointment survives every demote-to-0 shape, including a harsher 2->0 coup", () => {
+    const em = makeEmitter(3);
+    const g = applyTransition(graphWithRival(), COUP_2_TO_0, 3, em, 'char:usurper');
+    expect(edgesTo(g, 'office:high-seat', 'appointment')).toHaveLength(1);
+  });
+
+  it('D14: a rival-scoped demote-to-exile still replays byte-identically from its own event deltas', () => {
+    const g0 = graphWithRival();
+    const em = makeEmitter(3);
+    const post = applyTransition(g0, COUP_1_TO_0, 3, em, 'char:usurper');
+    const deltas = em.all().flatMap((e) => e.deltas);
+    expect(deltas.length).toBeGreaterThan(0);
+    const replayed = applyDeltas(g0, deltas);
+    expect(hashValue(replayed)).toBe(hashValue(post));
+  });
+
+  // INVESTIGATION FINDING, pinned directly: with NO rivalId configured --
+  // the exact shape of every OTHER season fixture in this engine today
+  // (this file's own RULES, starterSeason()) -- an ordinary real demotion
+  // vacates a rival-held office exactly as it always did. This is the
+  // fix's documented limit, not a new defect, and it is also the direct
+  // proof for this task's investigation question: the vacate-everything
+  // behavior was never self-transition-only -- it hits an ordinary 1->0
+  // fall identically, for exactly as long as content has been seating a
+  // rival in an office already present in the graph at that moment.
+  it('documented limit: with no rivalId configured, a real demotion still vacates a rival-held office exactly as before', () => {
+    const em = makeEmitter(3);
+    const g = applyTransition(graphWithRival(), COUP_1_TO_0, 3, em); // rivalId omitted
+    expect(edgesTo(g, 'office:high-seat', 'appointment')).toHaveLength(0);
   });
 });

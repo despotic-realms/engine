@@ -550,7 +550,12 @@ export function resolveTick(
     // ReignState.bookings vocabulary, exactly as before TierRule.books
     // existed.
     const tierChangedId = em.nextId();
-    g = applyTransition(g, rule, tick, em);
+    // v0.5.1: rivalId passed through so applyTransition's demote-to-0
+    // vacate branch can exempt the rival's own appointment (ladder.ts's own
+    // comment on that branch has the full defect and fix) -- the same
+    // optional field advanceCharacterArcs already reads a few lines above,
+    // for the same "which character is the external rival" question.
+    g = applyTransition(g, rule, tick, em, season.rivalId);
     tier = rule.to;
     // v0.4.1: a transition's own `books` (ladder.ts) records exactly like a
     // chosen option's (steps 3/4 above, same recordBooking helper -- their
