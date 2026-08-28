@@ -16,7 +16,7 @@ import { getNode, nodeIds } from './graph.js';
 import type { TierRule } from './ladder.js';
 import { applyTransition, checkLadder } from './ladder.js';
 import type { Binding } from './match.js';
-import type { Op } from './ops.js';
+import type { FlashpointDef, Op } from './ops.js';
 import { applyOp, validateOp } from './ops.js';
 import type { MediationConfig } from './mediate.js';
 import { applyMediatedOp } from './mediate.js';
@@ -51,6 +51,16 @@ export interface SeasonConfig {
    *  run regardless -- only the informational arc.poach.bid event and
    *  arc.departed's `toId` (null instead) are affected. */
   rivalId?: string;
+  /** Claim §3 (2026-08-20 claim plan, Global Constraints): the campaign's
+   *  named flashpoints, keyed by flashpointId. Absent means the claim
+   *  campaign hasn't reached this season yet (or ever) -- press_claim
+   *  (ops.ts) then rejects every flashpointId at validateOp (nothing to
+   *  look up), the correct behavior for a season that authors no
+   *  flashpoints at all. Read by validateOp/applyOp (ops.ts) via the
+   *  optional trailing parameters this file's resolveTick threads through
+   *  at each of its own call sites -- see this module's task-3 report for
+   *  the full call-site audit. */
+  flashpoints?: Record<string, FlashpointDef>;
 }
 
 /** Deterministic content hash of the season's world-side bundle (host adds model pins per D15). */
@@ -215,7 +225,11 @@ export function validateDecisions(season: SeasonConfig, state: ReignState, raw: 
     if (hasOps) {
       if (!Array.isArray(ops)) return { ok: false, error: `choice '${briefId}' ops must be an array` };
       for (const op of ops as unknown[]) {
-        const r = validateOp(state.graph, op);
+        // Claim §3: threads season.flashpoints so a directive-compiled
+        // press_claim op (validated here, the raw-`ops` path) is checked
+        // against the REAL flashpoints table, not the {} default -- see
+        // ops.ts's validateOp for the full call-site rationale.
+        const r = validateOp(state.graph, op, season.flashpoints ?? {});
         if (!r.ok) return { ok: false, error: `bad op on '${briefId}': ${r.error}` };
       }
     }
@@ -318,11 +332,19 @@ function applyOpWithWants(
   em: Emitter,
   seatId: string,
   parents: string[],
+  // Claim §3: threaded through to whichever branch below actually applies
+  // the op -- see ops.ts's applyOp header comment for why this and
+  // `fortune` (already a parameter here, unlike at applyOp) both need to
+  // reach press_claim's own resolution. Optional/defaulted so this
+  // function's two existing call sites elsewhere in this file (both
+  // updated to pass the real season.flashpoints) and any future one stay
+  // source-compatible even without the new argument.
+  flashpoints: Record<string, FlashpointDef> = {},
 ): WorldGraph {
   const before = em.all().length;
   let g2 = tierCfg.mediation
-    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, seatId, parents)
-    : applyOp(g, op, tick, em, seatId, parents);
+    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, seatId, parents, flashpoints)
+    : applyOp(g, op, tick, em, seatId, parents, flashpoints, fortune);
   const landedEvent = em.all().slice(before).find((e) => e.type === `op.${op.kind}`);
   if (landedEvent) g2 = advanceWants(g2, landedOp(op, landedEvent.data), tick, em, landedEvent.id);
   return g2;
@@ -343,6 +365,10 @@ export function resolveTick(
   let bookings = state.bookings;
   const tierCfg = season.tiers[state.tier];
   if (!tierCfg) throw new Error(`no tier config for tier ${state.tier}`);
+  // Claim §3: read once, reused at every validateOp/applyOpWithWants call
+  // site below (steps 3 and 4) -- see ops.ts's applyOp/validateOp headers
+  // for why both need this table threaded through.
+  const flashpoints = season.flashpoints ?? {};
 
   // 1-2. Record decisions; the attention cut is the agent's own ordering.
   const attended = decisions.choices.slice(0, tierCfg.attentionSlots);
@@ -363,9 +389,9 @@ export function resolveTick(
       : undefined;
     const ops = chosenOption ? bindOps(chosenOption.ops, pending.binding) : choice.ops ?? [];
     for (const op of ops) {
-      const r = validateOp(g, op);
+      const r = validateOp(g, op, flashpoints);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
-      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!]);
+      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!], flashpoints);
     }
     // Causality §3 (T4): booking is a property of the CHOSEN OPTION, not of
     // any individual op's success -- records once per attended choice whose
@@ -393,9 +419,9 @@ export function resolveTick(
       data: { briefId: pending.briefId, storyletId: pending.storyletId, defaultOptionId: pending.defaultOptionId },
     });
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
-      const r = validateOp(g, op);
+      const r = validateOp(g, op, flashpoints);
       if (r.ok) {
-        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id]);
+        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id], flashpoints);
       } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
     }
     // Causality §3 (T4): the default path books too (plan test (e)) --

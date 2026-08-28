@@ -12,7 +12,7 @@ import { edgesTo, findEdge, getNode, propStr } from './graph.js';
 import { fx, fxToString, mulFx, FX_ZERO } from './fx.js';
 import type { Fx } from './fx.js';
 import { canonJson } from './canon.js';
-import { applyOp, validateOp, OP_KINDS, type Op } from './ops.js';
+import { applyOp, validateOp, OP_KINDS, type FlashpointDef, type Op } from './ops.js';
 import { currentWant, hasTrait, aptOf, BANDS, type AptKey, type Band } from './spine.js';
 
 export interface MediationConfig {
@@ -191,6 +191,16 @@ function opKeyOf(op: Op): string {
 // a landed op stamps must credit the DECIDING seat, never `executorId` (the
 // office holder who mechanically did the work, scored by willingness/band
 // above). See src/ops.ts's applyOp for the stamp itself.
+// flashpoints (claim §3, task-3 controller-pinned seam): forwarded straight
+// through to BOTH applyOp call sites below, unchanged, the same way seatId
+// already is -- this function has no use for the table itself (it never
+// inspects flashpointId or resolves a flashpoint), only applyOp's own
+// 'press_claim' case does. Optional, defaulting to {}, so every existing
+// call site (this file has none of its own; the test suite's ~20) keeps
+// compiling: none of them ever construct a press_claim op, and domain: null
+// ops (press_claim included) return at the line just below before `fortune`
+// -- already a required parameter here, unlike at applyOp -- would matter
+// for anything but this same pass-through.
 export function applyMediatedOp(
   g: WorldGraph,
   op: Op,
@@ -200,9 +210,10 @@ export function applyMediatedOp(
   cfg: MediationConfig,
   seatId: string,
   parents: string[] = [],
+  flashpoints: Record<string, FlashpointDef> = {},
 ): WorldGraph {
   const domain = OP_KINDS[op.kind].domain;
-  if (domain === null) return applyOp(g, op, tick, em, seatId, parents); // crown's own voice, no office involved
+  if (domain === null) return applyOp(g, op, tick, em, seatId, parents, flashpoints, fortune); // crown's own voice, no office involved
 
   const officeId = cfg.officeForDomain[domain];
   const executorId = executorOf(g, officeId);
@@ -265,7 +276,7 @@ export function applyMediatedOp(
   if (band !== 'botched') {
     const scaled = scaleOp(op, band);
     const scaledCheck = validateOp(g2, scaled);
-    g2 = applyOp(g2, scaledCheck.ok ? scaled : op, tick, em, seatId, [executedEventId]);
+    g2 = applyOp(g2, scaledCheck.ok ? scaled : op, tick, em, seatId, [executedEventId], flashpoints, fortune);
   }
 
   if (domain === greedySkim.domain && BANDS.indexOf(band) < BANDS.indexOf(greedySkim.belowBand) && hasTrait(g2, executorId, greedySkim.trait)) {

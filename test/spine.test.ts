@@ -31,6 +31,7 @@ describe('spine vocabularies', () => {
       vet: 'social', obscure_records: 'social', // Task 9, spec §9
       borrow: 'econ', repay: 'econ', // Renderer-law T2, debt mechanism
       pledge: null, // Claim §2, 2026-08-20 claim plan -- direct throne speech
+      press_claim: null, // Claim §3, 2026-08-20 claim plan -- direct throne speech, its own banding
     };
     expect(Object.fromEntries(Object.entries(OP_KINDS).map(([k, d]) => [k, d.domain]))).toEqual(expected);
   });
