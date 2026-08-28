@@ -422,15 +422,25 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
       const charId = op['charId'] as string;
       const wantKey = op['wantKey'] as string;
       if (currentWant(g, charId) !== wantKey) return { ok: false, error: `'${wantKey}' is not ${charId}'s current want` };
-      // "no existing unbroken promise edge to that char" -- mirrors
-      // declarationStep's own `props['broken'] !== true` reading of
-      // "unbroken" (systems.ts), not a bespoke `=== false` check, so a
-      // future promise-breaking mechanic (out of scope this round, Global
-      // Constraints) that marks a promise broken by some means OTHER than
-      // literally setting `broken: true` still reads consistently on both
-      // sides.
+      // Review finding (post-6ed72f9, controller-adjudicated): a broken
+      // promise edge still occupies the (type,src,dst) edge id (graph.ts's
+      // edgeId() is keyed on that triplet alone, ignoring props) --
+      // applyOp's bare edge.add would collide with it and throw, the exact
+      // failure class borrow's own self-loan guard above exists to head
+      // off for debt edges. Redemption/replacement of a broken promise is
+      // explicitly out of scope (promise-BREAKING mechanics, Global
+      // Constraints): a broken promise is a permanent betrayal record,
+      // never removed or overwritten here -- so ANY existing promise edge,
+      // broken or not, blocks a new pledge to the same character. The two
+      // cases get distinguishable errors (declarationStep's own
+      // `!== true` reading of "unbroken" still names the boundary between
+      // them) so a caller/analyst can tell "already promised" apart from
+      // "that promise is already broken".
       const existing = findEdge(g, 'promise', 'inst:crown', charId);
-      if (existing && existing.props['broken'] !== true) return { ok: false, error: 'an unbroken promise already exists for that character' };
+      if (existing) {
+        if (existing.props['broken'] === true) return { ok: false, error: "the crown's word to them is already broken" };
+        return { ok: false, error: 'an unbroken promise already exists for that character' };
+      }
       break;
     }
   }

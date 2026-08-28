@@ -697,16 +697,36 @@ describe('validateOp: pledge', () => {
     expect(r.ok).toBe(false);
   });
 
-  // Confirms the rejection above keys on UNBROKEN specifically (mirrors
-  // declarationStep's own "broken: true doesn't satisfy" pin above) --
-  // promise-BREAKING mechanics are out of scope this round (Global
-  // Constraints), but a hand-flipped broken flag must not permanently wall
-  // off a character from ever being pledged to again.
-  it('a BROKEN existing promise does not block a new pledge to the same character', () => {
+  // Controller ruling (review follow-up on 6ed72f9): a broken promise edge
+  // still occupies the (type,src,dst) edge id (graph.ts's edgeId() is keyed
+  // on that triplet alone, ignoring props) -- applyOp's bare edge.add would
+  // collide with it and throw, the exact failure class borrow's own
+  // self-loan guard (ops.ts, `lenderId === 'inst:crown'`) exists to head
+  // off for debt edges. Proved at the applyOp level by review (scratch
+  // test, not reproduced here -- validateOp is the correct place to close
+  // it, and this suite pins validateOp's own contract). Redemption/
+  // replacement of a broken promise is explicitly out of scope (promise-
+  // BREAKING mechanics, Global Constraints, plan §7): a broken promise is
+  // a permanent betrayal record, never removed or overwritten here, so ANY
+  // existing promise edge -- broken or not -- blocks a new pledge to the
+  // same character, just for two distinguishable reasons. Supersedes this
+  // suite's own earlier (wrong) pin that a broken promise didn't block a
+  // re-pledge at all.
+  it('a BROKEN existing promise ALSO blocks a new pledge -- rejected, with an error distinct from the unbroken-duplicate case', () => {
     const g0 = pledgeGraph();
     const g1 = applyOp(g0, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }, 1, makeEmitter(1), 'seat:throne');
     const g2 = setEdgeProp(g1, edgeId('promise', 'inst:crown', 'char:tam'), 'broken', true);
-    expect(validateOp(g2, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }).ok).toBe(true);
+
+    const rBroken = validateOp(g2, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' });
+    expect(rBroken.ok).toBe(false);
+
+    // The sibling (still-unbroken) case, recomputed here rather than
+    // reused from the test above so this test stands alone as the one
+    // pinning "the two rejections are distinguishable".
+    const rUnbroken = validateOp(g1, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' });
+    expect(rUnbroken.ok).toBe(false);
+
+    if (!rBroken.ok && !rUnbroken.ok) expect(rBroken.error).not.toBe(rUnbroken.error);
   });
 });
 
