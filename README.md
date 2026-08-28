@@ -273,7 +273,13 @@ promote or demote the reign) is content's own data, named in
 `SeasonConfig.flashpoints`. A demotion landing at Tier 0 (self-transitions
 included) vacates only the falling ruler's own court appointments, never a
 rival's — named via `SeasonConfig.rivalId`, the rival keeps the very office
-this opposition weight reads, through every loss.
+this opposition weight reads, through every loss. A press whose outcome
+would promote the reign is checked, at press time, against that
+promotion's own `claimRequire` threshold — a decisive win can never
+substitute for the backing and treasury the ordinary path must clear — and
+a flashpoint may declare `cooldownTicks`, a minimum gap enforced between
+two presses of the same flashpoint, so pressing for free, forever, is no
+longer a path to the throne (v0.5.2).
 
 **Momentum through waverers** — a costly success or triumph sways every
 circle character close to declaring but not there yet; a rout or setback
