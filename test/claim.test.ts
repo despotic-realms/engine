@@ -19,10 +19,12 @@ import { hashValue } from '../src/canon.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
 import { fx } from '../src/fx.js';
 import { makeFortune } from '../src/fortune.js';
-import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode, propFx, setEdgeProp } from '../src/graph.js';
+import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode, propFx, setEdgeProp, setNodeProp } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
 import type { CharacterArc } from '../src/arcs.js';
 import { advanceCharacterArcs } from '../src/arcs.js';
+import { CLAIM_TARGET_NONE, applyTransition, checkLadder, declaredBackingBp } from '../src/ladder.js';
+import type { TierRule } from '../src/ladder.js';
 import { DEEDS, OP_KINDS, applyOp, validateOp } from '../src/ops.js';
 import { WANT_KEYS } from '../src/spine.js';
 import { declarationStep } from '../src/systems.js';
@@ -886,5 +888,271 @@ describe('pledge composes with T2 attribution (claim §2, no special-casing)', (
     expect(findEdge(out2.state.graph, 'promise', 'inst:crown', 'char:tam')).toBeDefined();
     const reactionBrief = out2.packet.briefs.find((b) => b.storyletId === 'pledge.reaction')!;
     expect(reactionBrief.becauseOf).toEqual([opEvent.id]);
+  });
+});
+
+// ============================================================
+// Task 5 (2026-08-20 claim plan): the claim tier gate. Two independent
+// mechanisms share checkLadder/applyTransition (src/ladder.ts):
+//  (1) decisive-outcome consumption (controller-pinned seam, task-5
+//      brief) -- press_claim (Task 3) stamps crown props claimPromoteTo/
+//      claimDemoteTo; checkLadder consumes them as the HIGHEST-priority
+//      transition check, and applyTransition clears the consumed prop(s).
+//  (2) TierRule.claimRequire (Global Constraints) -- an ordinary threshold
+//      gate, evaluated instead of `when`, that fires on declared backing
+//      bp + treasury.
+// Mirrors this file's own fixture style (crownGraph, small local helpers)
+// and test/bookings.test.ts's TierRule.books harness for the composition
+// test.
+// ============================================================
+
+describe('checkLadder: decisive-outcome consumption (claim §5, controller-pinned seam)', () => {
+  it('claimPromoteTo (a plain tier number) fires the matching promote rule at year end', () => {
+    let g = crownGraph('0');
+    g = setNodeProp(g, 'inst:crown', 'claimPromoteTo', 1);
+    const rule: TierRule = { from: 0, to: 1, kind: 'promote', note: 'return' };
+    expect(checkLadder(g, 0, 3, [rule])).toBe(rule);
+  });
+
+  it('claimDemoteTo fires the matching demote rule, symmetrically', () => {
+    let g = crownGraph('0');
+    g = setNodeProp(g, 'inst:crown', 'claimDemoteTo', 2);
+    const rule: TierRule = { from: 3, to: 2, kind: 'demote', note: 'fall' };
+    expect(checkLadder(g, 3, 3, [rule])).toBe(rule);
+  });
+
+  it('0 is a real tier target, not "absent" -- claimDemoteTo: 0 still fires (typeof check, never truthiness)', () => {
+    let g = crownGraph('0');
+    g = setNodeProp(g, 'inst:crown', 'claimDemoteTo', 0);
+    // An always-false `when`, so only the decisive branch could ever return this rule.
+    const rule: TierRule = { from: 1, to: 0, kind: 'demote', note: 'fall', when: { nodes: [{ as: 'x', type: 'project' }] } };
+    expect(checkLadder(g, 1, 3, [rule])).toBe(rule);
+  });
+
+  it('outranks an ordinary rule that would ALSO match this tick -- decisive is checked before every threshold rule, regardless of list order', () => {
+    let g = crownGraph('0');
+    g = setNodeProp(g, 'inst:crown', 'claimPromoteTo', 2);
+    // A genuinely satisfiable ordinary rule to a DIFFERENT tier, listed
+    // FIRST: pre-T5 (list-order-only) logic would return this one instead.
+    const ordinary: TierRule = { from: 1, to: 3, kind: 'promote', note: 'ordinary', when: { nodes: [{ as: 'crown', type: 'institution' }] } };
+    const decisive: TierRule = { from: 1, to: 2, kind: 'promote', note: 'decisive-target' };
+    expect(checkLadder(g, 1, 3, [ordinary, decisive])).toBe(decisive);
+  });
+
+  it('a decisive prop with no matching (from, kind, to) rule this tick falls through to the ordinary rules, untouched (documented limitation, not a crash)', () => {
+    let g = crownGraph('0');
+    g = setNodeProp(g, 'inst:crown', 'claimPromoteTo', 9); // no rule targets tier 9
+    const ordinary: TierRule = { from: 1, to: 3, kind: 'promote', note: 'ordinary', when: { nodes: [{ as: 'crown', type: 'institution' }] } };
+    expect(checkLadder(g, 1, 3, [ordinary])).toBe(ordinary);
+  });
+
+  it('not year-end: the decisive branch is not consulted either, same guard as every other rule', () => {
+    let g = crownGraph('0');
+    g = setNodeProp(g, 'inst:crown', 'claimPromoteTo', 1);
+    const rule: TierRule = { from: 0, to: 1, kind: 'promote', note: 'return' };
+    expect(checkLadder(g, 0, 1, [rule])).toBeNull();
+  });
+});
+
+describe('applyTransition: clearing a consumed decisive signal (claim §5, controller-pinned seam)', () => {
+  it('promote: claimPromoteTo reads as absent after the transition (CLAIM_TARGET_NONE sentinel -- see its own doc comment for why not real key deletion), delta-carried on tier.changed, replay-equivalent', () => {
+    let g0 = crownGraph('0');
+    g0 = setNodeProp(g0, 'inst:crown', 'claimPromoteTo', 1);
+    const rule: TierRule = { from: 0, to: 1, kind: 'promote', note: 'return' };
+    const em = makeEmitter(3);
+    const post = applyTransition(g0, rule, 3, em);
+
+    expect(getNode(post, 'inst:crown').props['claimPromoteTo']).toBe(CLAIM_TARGET_NONE); // never the original 1
+    // Observable "absence": a later year-end check against the SAME rule
+    // finds nothing pending -- the signal was truly single-use.
+    expect(checkLadder(post, 1, 7, [rule])).toBeNull();
+
+    const events = em.all();
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('tier.changed');
+    const replayed = applyDeltas(g0, events.flatMap((e) => e.deltas));
+    expect(hashValue(replayed)).toBe(hashValue(post));
+  });
+
+  it('demote: claimDemoteTo clears symmetrically', () => {
+    let g0 = crownGraph('0');
+    g0 = setNodeProp(g0, 'inst:crown', 'claimDemoteTo', 0);
+    const rule: TierRule = { from: 1, to: 0, kind: 'demote', note: 'fall' };
+    const em = makeEmitter(3);
+    const post = applyTransition(g0, rule, 3, em);
+    expect(getNode(post, 'inst:crown').props['claimDemoteTo']).toBe(CLAIM_TARGET_NONE);
+  });
+
+  it('both-set determinism: promote wins (regardless of list order), and BOTH props clear even though only the promote rule fired', () => {
+    let g0 = crownGraph('0');
+    g0 = setNodeProp(g0, 'inst:crown', 'claimPromoteTo', 2);
+    g0 = setNodeProp(g0, 'inst:crown', 'claimDemoteTo', 0);
+    const promoteRule: TierRule = { from: 1, to: 2, kind: 'promote', note: 'p' };
+    const demoteRule: TierRule = { from: 1, to: 0, kind: 'demote', note: 'd' };
+
+    const rule = checkLadder(g0, 1, 3, [demoteRule, promoteRule]); // demote listed FIRST -- promote must still win
+    expect(rule).toBe(promoteRule);
+
+    const em = makeEmitter(3);
+    const post = applyTransition(g0, rule!, 3, em);
+    expect(getNode(post, 'inst:crown').props['claimPromoteTo']).toBe(CLAIM_TARGET_NONE);
+    expect(getNode(post, 'inst:crown').props['claimDemoteTo']).toBe(CLAIM_TARGET_NONE); // cleared too, though its own rule never fired
+    expect(getNode(post, 'inst:crown').props['inExile']).toBeUndefined(); // the demote-to-0 vacate branch truly never ran
+
+    expect(checkLadder(post, 2, 7, [demoteRule, promoteRule])).toBeNull(); // nothing pending in either direction now
+  });
+
+  it('a transition reached via an ordinary when/claimRequire match (no decisive prop involved) leaves both props untouched -- no spurious clearing', () => {
+    let g0 = crownGraph('0');
+    g0 = setNodeProp(g0, 'inst:crown', 'treasury', fx('500'));
+    const rule: TierRule = {
+      from: 1, to: 2, kind: 'promote', note: 'ordinary',
+      when: { nodes: [{ as: 'crown', type: 'institution', where: [{ prop: 'treasury', cmp: 'ge', value: fx('500') }] }] },
+    };
+    const em = makeEmitter(3);
+    const post = applyTransition(g0, rule, 3, em);
+    expect(getNode(post, 'inst:crown').props['claimPromoteTo']).toBeUndefined();
+    expect(getNode(post, 'inst:crown').props['claimDemoteTo']).toBeUndefined();
+    expect(em.all()[0]?.deltas).toEqual([]); // no vacate branch, no decisive clear -- zero deltas for this bare transition
+  });
+});
+
+describe('TierRule.claimRequire (the claim tier gate, Global Constraints)', () => {
+  function gateGraph(backingBpValues: number[], treasury: string): WorldGraph {
+    let g = crownGraph('0');
+    g = setNodeProp(g, 'inst:crown', 'treasury', fx(treasury));
+    backingBpValues.forEach((bp, i) => {
+      const charId = `char:backer${i}`;
+      g = addNode(g, { id: charId, type: 'character', props: { name: charId } });
+      g = addEdge(g, { type: 'backing', src: charId, dst: 'inst:crown', props: { declaredAt: 0, bp, viaPromise: '' } });
+    });
+    return g;
+  }
+
+  const RULE: TierRule = { from: 0, to: 1, kind: 'promote', note: 'return', claimRequire: { backingBp: 3000, treasury: fx('50') } };
+
+  it('does not fire when backing is met but treasury is not', () => {
+    expect(checkLadder(gateGraph([3000], '49'), 0, 3, [RULE])).toBeNull();
+  });
+
+  it('does not fire when treasury is met but backing is not', () => {
+    expect(checkLadder(gateGraph([2999], '50'), 0, 3, [RULE])).toBeNull();
+  });
+
+  it('does not fire when NEITHER is met', () => {
+    expect(checkLadder(gateGraph([0], '0'), 0, 3, [RULE])).toBeNull();
+  });
+
+  it('fires once both thresholds are met, summing bp across multiple declared backers', () => {
+    const g = gateGraph([1000, 2000], '50');
+    expect(declaredBackingBp(g)).toBe(3000);
+    expect(checkLadder(g, 0, 3, [RULE])).toBe(RULE);
+  });
+
+  it('boundary: exactly at both thresholds fires (>=, inclusive)', () => {
+    expect(checkLadder(gateGraph([3000], '50'), 0, 3, [RULE])).toBe(RULE);
+  });
+
+  it('one basis point under backingBp does not fire even with an overwhelming treasury', () => {
+    expect(checkLadder(gateGraph([2999], '999'), 0, 3, [RULE])).toBeNull();
+  });
+
+  it('a rule with `when` instead of claimRequire is completely unaffected (backward compatibility)', () => {
+    const g = setNodeProp(crownGraph('0'), 'inst:crown', 'treasury', fx('600'));
+    const whenRule: TierRule = {
+      from: 1, to: 2, kind: 'promote', note: 'legacy',
+      when: { nodes: [{ as: 'crown', type: 'institution', where: [{ prop: 'treasury', cmp: 'ge', value: fx('500') }] }] },
+    };
+    expect(checkLadder(g, 1, 3, [whenRule])).toBe(whenRule);
+  });
+});
+
+describe('claimRequire composes with TierRule.books (Global Constraint: the claim-gated return force-deals its arrival scene, v0.4.1 mechanism)', () => {
+  function returnScene(id: string): Storylet {
+    return {
+      id, kind: 'brief', tier: 1, cooldownTicks: 0, once: true,
+      pattern: { nodes: [{ as: 'p', type: 'place' }] },
+      title: id, body: id,
+      options: [{ id: 'a', label: 'a', ops: [] }],
+      defaultOptionId: 'a',
+    };
+  }
+  function filler(id: string): Storylet {
+    return {
+      id, kind: 'brief', tier: 1, cooldownTicks: 0, once: false,
+      pattern: { nodes: [{ as: 'p', type: 'place' }] },
+      title: id, body: id,
+      options: [{ id: 'a', label: 'a', ops: [] }],
+      defaultOptionId: 'a',
+    };
+  }
+
+  // Mirrors test/bookings.test.ts's seasonForTransition/floodSeason harness:
+  // tier 0 (exile) carries no decks at all, so the tier-1 return scene and
+  // its filler competitor are both genuinely unreachable until the
+  // instant the transition flips `tier`.
+  function claimReturnSeason(opts: { backers: number[]; treasury: string }): SeasonConfig {
+    let g = emptyGraph();
+    g = addNode(g, {
+      id: 'inst:crown', type: 'institution',
+      props: { treasury: fx(opts.treasury), legitimacy: fx('0'), arrears: fx('0'), rulerCharId: 'char:ruler' },
+    });
+    g = addNode(g, {
+      id: 'place:camp', type: 'place',
+      props: {
+        name: 'Camp', population: fx('100'), granary: fx('250'), farmland: fx('10'),
+        unrest: fx('10'), dole: fx('0'), taxRateBp: 1000, roadsBonusBp: 0, defenseBp: 0,
+        famineStage: 0, famineEndsAt: 0, levy: fx('0'),
+      },
+    });
+    g = addNode(g, { id: 'char:ruler', type: 'character', props: { name: 'Ruler' } });
+    opts.backers.forEach((bp, i) => {
+      const charId = `char:backer${i}`;
+      g = addNode(g, { id: charId, type: 'character', props: { name: charId } });
+      g = addEdge(g, { type: 'backing', src: charId, dst: 'inst:crown', props: { declaredAt: 0, bp, viaPromise: '' } });
+    });
+    return {
+      seasonId: 'claim-books-compose',
+      startTier: 0,
+      initialGraph: g,
+      decks: [{ id: 'tier1', tier: 1, storylets: [returnScene('return.scene'), filler('filler.1')] }],
+      tiers: {
+        0: { deckIds: [], briefBudget: 0, attentionSlots: 1 },
+        1: { deckIds: ['tier1'], briefBudget: 1, attentionSlots: 1 },
+      },
+      calendar: [],
+      tierRules: [{
+        from: 0, to: 1, kind: 'promote', note: 'return',
+        claimRequire: { backingBp: 3000, treasury: fx('50') },
+        books: { storyletId: 'return.scene', withinTicks: 1 },
+      }],
+      throne: { id: 'seat:throne', kind: 'throne', bodyCharId: 'char:ruler', attentionSlots: 1, fidelity: 'external' },
+      reporters: [],
+      primaryPlaceId: 'place:camp',
+    };
+  }
+
+  it('gate not met: no transition, no booking -- the reign stays in exile', () => {
+    const season = claimReturnSeason({ backers: [500], treasury: '5000' }); // backing far short; treasury alone never gates
+    const f = makeFortune('claim-books-not-met');
+    let state = initialState(season);
+    let out: ReturnType<typeof resolveTick> | undefined;
+    for (let i = 0; i < 4; i++) { out = resolveTick(season, state, { seatId: 'seat:throne', choices: [] }, f); state = out.state; }
+    expect(out!.state.tier).toBe(0);
+    expect(out!.events.some((e) => e.type === 'tier.changed')).toBe(false);
+    expect(out!.events.some((e) => e.type === 'scene.booked')).toBe(false);
+  });
+
+  it('gate met: the transition fires via claimRequire AND force-deals the booked return scene on the first post-transition tick, beating the filler for the one budget slot', () => {
+    const season = claimReturnSeason({ backers: [5000], treasury: '5000' }); // comfortably past both thresholds
+    const f = makeFortune('claim-books-met');
+    let state = initialState(season);
+    let out: ReturnType<typeof resolveTick> | undefined;
+    for (let i = 0; i < 4; i++) { out = resolveTick(season, state, { seatId: 'seat:throne', choices: [] }, f); state = out.state; }
+    expect(out!.state.tier).toBe(1);
+    expect(out!.events.some((e) => e.type === 'tier.changed')).toBe(true);
+    expect(out!.events.some((e) => e.type === 'scene.booked')).toBe(true);
+    expect(out!.packet.briefs.map((b) => b.storyletId)).toEqual(['return.scene']); // budget 1, force-dealt ahead of the filler
+    expect(out!.state.bookings).toEqual([]); // dealt this same tick, not left holding
   });
 });
