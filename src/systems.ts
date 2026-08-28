@@ -531,7 +531,20 @@ export function declarationStep(g0: WorldGraph, tick: number, em: Emitter): Worl
     if (effectiveLoyalty(g, charId, trueLoyalty) < DECLARE_LOYALTY) continue;
 
     const bp = node.props['claimBp'];
-    const viaPromise = pledged && promiseEdge ? promiseEdge.id : '';
+    // Controller adjudication (2026-08-27, second review pass): viaPromise
+    // names a CAUSE, and a named cause must be true (the project's
+    // attribution-honesty precedent -- attribution.ts's becauseOf follows
+    // the same rule for a different mechanism). viaPromise is read
+    // downstream as "the promise is WHY they declared" and Stage 2 (T3)
+    // will collect on it as an obligation, so it may only be stamped when
+    // the promise was the OPERATIVE qualifier: pledged AND the
+    // fulfilled-want path did NOT already qualify them on its own. A
+    // character who genuinely fulfilled their want declares via that path
+    // regardless of any live promise that happens to also name their
+    // current want -- the fulfillment, not the promise, is why they
+    // declared (test/claim.test.ts's "overlap" case pins this; supersedes
+    // the first pass's "stamp whenever a valid promise exists" reading).
+    const viaPromise = pledged && !anyWantFulfilled && promiseEdge ? promiseEdge.id : '';
     const deltas: GraphDelta[] = [{
       op: 'edge.add',
       edge: { id: edgeId('backing', charId, 'inst:crown'), type: 'backing', src: charId, dst: 'inst:crown', props: { declaredAt: tick, bp, viaPromise } },

@@ -260,6 +260,44 @@ describe('declarationStep', () => {
       expect(em.all()[0]?.data).toEqual({ charId: 'char:tam', bp: 1200, viaPromise: promiseId });
     });
 
+    // Controller adjudication (2026-08-27, second review pass), overruling
+    // the first pass's "stamp viaPromise whenever a valid promise exists"
+    // choice: per the project's attribution-honesty precedent (a cause
+    // named must be TRUE -- viaPromise is read downstream as "the promise
+    // is WHY they declared," and Stage 2 will collect on it as an
+    // obligation), viaPromise is stamped ONLY when the promise is the
+    // OPERATIVE qualifier -- pledged AND NOT already want-fulfilled. A
+    // character whose want is genuinely fulfilled declares via THAT path,
+    // full stop, even if an unrelated live promise also happens to name
+    // their current want -- the fulfillment, not the promise, is why they
+    // declared, so viaPromise must read '' (contrast with the pure-promise
+    // companion test just above, where wantIndex is 0 and the promise
+    // really is the only reason).
+    it('overlap: wantIndex > 0 (a want already fulfilled) AND a valid live promise for the CURRENT want -- declares via the fulfilled-want path; viaPromise stays "" because the promise was not the operative qualifier', () => {
+      let g = crownGraph('0');
+      g = addNode(g, {
+        id: 'char:both', type: 'character',
+        // 'coin' already fulfilled (wantIndex 1 -- anyWantFulfilled true on
+        // its own); 'office' is the current want, still outstanding.
+        props: { name: 'Both Paths', claimCircle: true, claimBp: 1400, wantChain: ['coin', 'office'], wantIndex: 1 },
+      });
+      g = addEdge(g, { type: 'loyalty', src: 'char:both', dst: 'char:ruler', props: { bp: 6000 } });
+      // A live, valid, unbroken promise naming the CURRENT want -- would
+      // satisfy the promise branch on its own, but is not needed here and
+      // must not be credited.
+      g = addEdge(g, {
+        type: 'promise', src: 'inst:crown', dst: 'char:both',
+        props: { wantKey: 'office', madeAt: 0, dueOn: 'restoration', broken: false },
+      });
+
+      const em = makeEmitter(1);
+      const post = declarationStep(g, 1, em);
+      const edge = findEdge(post, 'backing', 'char:both', 'inst:crown');
+      expect(edge).toBeDefined(); // still declares -- the fulfilled-want path alone qualifies
+      expect(edge?.props).toEqual({ declaredAt: 1, bp: 1400, viaPromise: '' });
+      expect(em.all()[0]?.data).toEqual({ charId: 'char:both', bp: 1400, viaPromise: '' });
+    });
+
     it('a BROKEN promise (broken: true) does not satisfy the price-answered condition', () => {
       let g = crownGraph('0');
       g = addNode(g, {
