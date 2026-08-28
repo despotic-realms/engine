@@ -270,7 +270,10 @@ it its declaration. A triumph despite hidden false stones leaves them
 standing, undiscovered, worse for later. The season's flashpoint table
 (opposition and asset stones, per-band consequences, and which bands
 promote or demote the reign) is content's own data, named in
-`SeasonConfig.flashpoints`.
+`SeasonConfig.flashpoints`. A demotion landing at Tier 0 (self-transitions
+included) vacates only the falling ruler's own court appointments, never a
+rival's — named via `SeasonConfig.rivalId`, the rival keeps the very office
+this opposition weight reads, through every loss.
 
 **Momentum through waverers** — a costly success or triumph sways every
 circle character close to declaring but not there yet; a rout or setback
