@@ -13,6 +13,7 @@ import { fx, fxToString, mulFx, FX_ZERO } from './fx.js';
 import type { Fx } from './fx.js';
 import { canonJson } from './canon.js';
 import { applyOp, validateOp, OP_KINDS, type FlashpointDef, type Op } from './ops.js';
+import type { TierRule } from './ladder.js';
 import { currentWant, hasTrait, aptOf, BANDS, type AptKey, type Band } from './spine.js';
 
 export interface MediationConfig {
@@ -201,6 +202,20 @@ function opKeyOf(op: Op): string {
 // ops (press_claim included) return at the line just below before `fortune`
 // -- already a required parameter here, unlike at applyOp -- would matter
 // for anything but this same pass-through.
+// tierRules/tier (v0.5.2 review fix, 2026-08-28, controller-adjudicated,
+// Critical): forwarded straight through to BOTH applyOp call sites below,
+// unchanged, the same way flashpoints already is -- this function has no
+// use for either value itself (it never inspects a TierRule or resolves a
+// tier transition), only applyOp's own 'press_claim' case does, at its
+// decisive-stamp step. Optional, defaulting to ([] / -1) like every other
+// call site in this file's neighborhood, so this function's own pre-
+// existing test coverage (none of which constructs a press_claim op) keeps
+// compiling unchanged. press_claim's domain is always null, so in practice
+// only the FIRST applyOp call site (the domain===null passthrough) can ever
+// receive one -- the second (post-band scaled-op) call site is forwarded
+// the same values purely for uniformity, since it costs nothing and a
+// reader should never have to reason about which of the two call sites a
+// given op kind can reach.
 export function applyMediatedOp(
   g: WorldGraph,
   op: Op,
@@ -211,9 +226,11 @@ export function applyMediatedOp(
   seatId: string,
   parents: string[] = [],
   flashpoints: Record<string, FlashpointDef> = {},
+  tierRules: readonly TierRule[] = [],
+  tier: number = -1,
 ): WorldGraph {
   const domain = OP_KINDS[op.kind].domain;
-  if (domain === null) return applyOp(g, op, tick, em, seatId, parents, flashpoints, fortune); // crown's own voice, no office involved
+  if (domain === null) return applyOp(g, op, tick, em, seatId, parents, flashpoints, fortune, tierRules, tier); // crown's own voice, no office involved
 
   const officeId = cfg.officeForDomain[domain];
   const executorId = executorOf(g, officeId);
@@ -276,7 +293,7 @@ export function applyMediatedOp(
   if (band !== 'botched') {
     const scaled = scaleOp(op, band);
     const scaledCheck = validateOp(g2, scaled);
-    g2 = applyOp(g2, scaledCheck.ok ? scaled : op, tick, em, seatId, [executedEventId], flashpoints, fortune);
+    g2 = applyOp(g2, scaledCheck.ok ? scaled : op, tick, em, seatId, [executedEventId], flashpoints, fortune, tierRules, tier);
   }
 
   if (domain === greedySkim.domain && BANDS.indexOf(band) < BANDS.indexOf(greedySkim.belowBand) && hasTrait(g2, executorId, greedySkim.trait)) {

@@ -237,7 +237,15 @@ export function validateDecisions(season: SeasonConfig, state: ReignState, raw: 
         // press_claim op (validated here, the raw-`ops` path) is checked
         // against the REAL flashpoints table, not the {} default -- see
         // ops.ts's validateOp for the full call-site rationale.
-        const r = validateOp(state.graph, op, season.flashpoints ?? {});
+        //
+        // v0.5.2 (severe exploit fix -- S-farm Finding 1): also threads
+        // state.tick so validateOp's gate B (the press cooldown) can measure
+        // "how long ago" against the graph-stored last-pressed fact. The
+        // claim-requirement check (formerly "gate A" here) was relocated to
+        // applyOp's decisive-stamp step in the 2026-08-28 review fix -- see
+        // validateOp's own header comment for why -- so this wire-gate check
+        // no longer threads season.tierRules/state.tier at all.
+        const r = validateOp(state.graph, op, season.flashpoints ?? {}, state.tick);
         if (!r.ok) return { ok: false, error: `bad op on '${briefId}': ${r.error}` };
       }
     }
@@ -348,11 +356,22 @@ function applyOpWithWants(
   // updated to pass the real season.flashpoints) and any future one stay
   // source-compatible even without the new argument.
   flashpoints: Record<string, FlashpointDef> = {},
+  // tierRules/tier (v0.5.2 review fix, 2026-08-28, controller-adjudicated,
+  // Critical): the claim-requirement check relocated from validateOp to
+  // applyOp's own decisive-stamp step -- see ops.ts's applyOp/validateOp
+  // header comments for the full "why". Threaded through to whichever
+  // branch below actually applies the op, the same optional/defaulted way
+  // flashpoints is, so this function's two real call sites (resolveTick's
+  // steps 3/4, both updated to pass season.tierRules/state.tier) carry the
+  // real ladder context while staying source-compatible with any future
+  // caller that omits it.
+  tierRules: readonly TierRule[] = [],
+  tier: number = -1,
 ): WorldGraph {
   const before = em.all().length;
   let g2 = tierCfg.mediation
-    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, seatId, parents, flashpoints)
-    : applyOp(g, op, tick, em, seatId, parents, flashpoints, fortune);
+    ? applyMediatedOp(g, op, tick, fortune, em, tierCfg.mediation, seatId, parents, flashpoints, tierRules, tier)
+    : applyOp(g, op, tick, em, seatId, parents, flashpoints, fortune, tierRules, tier);
   const landedEvent = em.all().slice(before).find((e) => e.type === `op.${op.kind}`);
   if (landedEvent) g2 = advanceWants(g2, landedOp(op, landedEvent.data), tick, em, landedEvent.id);
   return g2;
@@ -397,9 +416,22 @@ export function resolveTick(
       : undefined;
     const ops = chosenOption ? bindOps(chosenOption.ops, pending.binding) : choice.ops ?? [];
     for (const op of ops) {
-      const r = validateOp(g, op, flashpoints);
+      // v0.5.2 (severe exploit fix -- S-farm Finding 1): threads this
+      // tick's own `tick` so validateOp's gate B (the press cooldown) can
+      // measure "how long ago" against the graph-stored last-pressed fact.
+      // The claim-requirement check moved to applyOpWithWants's own
+      // applyOp call below in the 2026-08-28 review fix (see ops.ts's
+      // validateOp/applyOp header comments for why) -- this validateOp call
+      // no longer threads season.tierRules/state.tier at all.
+      const r = validateOp(g, op, flashpoints, tick);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
-      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!], flashpoints);
+      // v0.5.2 review fix (2026-08-28): season.tierRules/state.tier reach
+      // applyOp's decisive-stamp step through here. `tier` is deliberately
+      // `state.tier`, not the local `tier` variable step 8 later declares:
+      // at this point the ladder hasn't run yet this tick, so state.tier IS
+      // the reign's current tier for every op this loop (and step 4 below)
+      // applies.
+      g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!], flashpoints, season.tierRules, state.tier);
     }
     // Causality §3 (T4): booking is a property of the CHOSEN OPTION, not of
     // any individual op's success -- records once per attended choice whose
@@ -427,9 +459,18 @@ export function resolveTick(
       data: { briefId: pending.briefId, storyletId: pending.storyletId, defaultOptionId: pending.defaultOptionId },
     });
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
-      const r = validateOp(g, op, flashpoints);
+      // v0.5.2 (severe exploit fix -- S-farm Finding 1): threads this
+      // tick's own `tick` so validateOp's gate B (the press cooldown) can
+      // measure "how long ago" against the graph-stored last-pressed fact.
+      // The claim-requirement check moved to applyOpWithWants's own
+      // applyOp call below in the 2026-08-28 review fix (see ops.ts's
+      // validateOp/applyOp header comments for why) -- this validateOp call
+      // no longer threads season.tierRules/state.tier at all.
+      const r = validateOp(g, op, flashpoints, tick);
       if (r.ok) {
-        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id], flashpoints);
+        // v0.5.2 review fix (2026-08-28): same season.tierRules/state.tier
+        // threading as step 3 above.
+        g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id], flashpoints, season.tierRules, state.tier);
       } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
     }
     // Causality §3 (T4): the default path books too (plan test (e)) --
