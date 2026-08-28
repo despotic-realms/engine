@@ -30,7 +30,7 @@ import type { Band, WantKey } from './spine.js';
 import { WANT_FULFILL, currentWant } from './spine.js';
 import type { Deck, Storylet, StoryletOption } from './storylet.js';
 import { bindOps, eligibleStorylets, possibleStorylets, renderTpl } from './storylet.js';
-import { debtOverdueStep, declarationStep, economyStep, fingerprintDecayStep, socialStep } from './systems.js';
+import { claimNudgeDecayStep, debtOverdueStep, declarationStep, economyStep, fingerprintDecayStep, socialStep } from './systems.js';
 
 export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number; mediation?: MediationConfig }
 
@@ -513,6 +513,13 @@ export function resolveTick(
   // ordering only affects which of this tick's events sort first, never the
   // outcome.
   g = fingerprintDecayStep(g, tick, em);
+  // Claim §3/momentum: claimNudge decay, adjacent to fingerprintDecayStep for
+  // the same reason -- claimNudge/claimNudgeAt are disjoint from recent:
+  // <deed> props (and from everything else this tick touches by this
+  // point), so ordering only affects which of this tick's events sort
+  // first, never the outcome. See systems.ts's claimNudgeDecayStep header
+  // for the full discipline (mirrors fingerprintDecayStep's own).
+  g = claimNudgeDecayStep(g, tick, em);
   // Renderer-law T2: debt overdue pass, adjacent to fingerprintDecayStep for
   // the same reason -- debt-edge props are disjoint from recent:<deed>
   // props (and from everything else this tick touches by this point), so

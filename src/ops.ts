@@ -17,7 +17,7 @@ import type { Fortune } from './fortune.js';
 import type { Fx } from './fx.js';
 import { clampFx, divFx, fx, fxFromInt, fxToString, fxWhole, mulFx, FX_ZERO } from './fx.js';
 import type { EdgeType, NodeId, NodeType, PropValue, WorldGraph } from './graph.js';
-import { appendAllegianceLog, edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, getNode, propFx, propInt, propStr } from './graph.js';
+import { appendAllegianceLog, edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, getNode, nodeIds, propFx, propInt, propStr } from './graph.js';
 // Claim §3 (2026-08-20 claim plan): Term's `when` clause reuses match.ts's
 // existing (Cmp, evalPredicate) pair verbatim rather than redeclaring a
 // second comparator vocabulary -- one-directional import (match.ts imports
@@ -36,6 +36,14 @@ import { evalPredicate } from './match.js';
 // runtime, so no real import cycle exists, only a type-level one.
 import { currentWant, hasTrait, WANT_KEYS } from './spine.js';
 import type { WantKey } from './spine.js';
+// Claim §3/momentum (2026-08-20 claim plan, Global Constraints): press_claim's
+// own nudge application (below) needs the SAME effective-loyalty formula and
+// the SAME DECLARE_LOYALTY threshold declarationStep (systems.ts) already
+// uses, reused verbatim rather than re-derived a second place -- see
+// systems.ts's own export comment on effectiveLoyalty for why the resulting
+// import cycle (systems.ts already imports DEED_NAMES/FINGERPRINT_TICKS from
+// THIS file) is safe.
+import { DECLARE_LOYALTY, effectiveLoyalty } from './systems.js';
 
 export type Op =
   | { kind: 'decree_tax'; placeId: string; rateBp: number }
@@ -675,6 +683,47 @@ function isFalseStone(g: WorldGraph, charId: string, rulerId: string): boolean {
   return findEdge(g, 'grudge', charId, rulerId) !== undefined || hasTrait(g, charId, 'cunning') || hasTrait(g, charId, 'vengeful');
 }
 
+// Momentum (claim §3, Global Constraints): the effective-loyalty floor a
+// circle character's score must clear to become sway-eligible ("waverer")
+// -- paired with DECLARE_LOYALTY (systems.ts) as the OTHER end of the same
+// half-open band [WAVERER_FLOOR, DECLARE_LOYALTY). Exported so tests can
+// cite it by name, mirroring TREACHERY_BP/DECLARE_LOYALTY's own precedent.
+export const WAVERER_FLOOR = 4000;
+
+// A "waverer" (claim §3, Global Constraints): a claim-circle character (the
+// SAME claimCircle===true AND claimBp:number AND declarationStep itself
+// uses) with no backing edge yet, not imprisoned (a cell is not a court --
+// mirrors declarationStep's own exclusion; nudging one toward a declaration
+// it could never make anyway would be inert, just untidy, to leave
+// unguarded), holding a REAL loyalty edge to the ruler (mirrors
+// declarationStep's other exclusion -- no edge, no default-to-neutral
+// qualification, the same false-stone-from-a-rival-court hole T1 closed for
+// declaring itself), whose EFFECTIVE loyalty (systems.ts's own exported
+// helper, reused verbatim rather than re-derived) sits in [WAVERER_FLOOR,
+// DECLARE_LOYALTY).
+//
+// Declared backers (a live `backing` edge) are handled separately at each
+// press_claim call site below, not folded into this predicate: the two
+// populations are mutually exclusive by construction (a waverer has no
+// backing edge; a declared backer does), and only ONE of them is ever
+// eligible for the +800 leg (waverers only) while BOTH are eligible for the
+// -400 leg -- a single boolean here reused identically for both callers
+// keeps that asymmetry visible at the call site instead of hidden inside a
+// combined predicate.
+function isWaverer(g: WorldGraph, charId: string, rulerId: string): boolean {
+  const node = getNode(g, charId);
+  if (node.type !== 'character') return false;
+  if (node.props['claimCircle'] !== true) return false;
+  if (typeof node.props['claimBp'] !== 'number') return false;
+  if (node.props['imprisoned'] === true) return false;
+  if (findEdge(g, 'backing', charId, 'inst:crown')) return false;
+  const loyaltyEdge = findEdge(g, 'loyalty', charId, rulerId);
+  if (!loyaltyEdge) return false;
+  const trueLoyalty = typeof loyaltyEdge.props['bp'] === 'number' ? (loyaltyEdge.props['bp'] as number) : 5000;
+  const eff = effectiveLoyalty(g, charId, trueLoyalty);
+  return eff >= WAVERER_FLOOR && eff < DECLARE_LOYALTY;
+}
+
 /** Per-mille ratio r = floor(trueScale*1000 / max(opposition,1)) (Global
  *  Constraints), via the SAME hand-rolled integer idiom hold_festival's own
  *  unrest-easing calc already uses in this file (divFx on plain integers
@@ -1243,6 +1292,62 @@ export function applyOp(
         }
         g2 = applyDeltas(g2, betrayalDeltas);
         em.emit('claim.betrayed', { parents: [flashpointEvent.id], data: { charId: target.charId }, deltas: betrayalDeltas });
+      }
+
+      // Momentum (claim §3, Global Constraints): a flashpoint's outcome
+      // sways hearts still undecided. Lives AFTER betrayal above --
+      // deliberately: an unmasked false stone this same resolution already
+      // lost its backing edge and paid its own, harsher, price (grudge
+      // +2000); it must not ALSO eat the -400 momentum penalty a moment
+      // later, so declaredBackers below is read off g2 as betrayal LEFT it,
+      // never the pre-resolution snapshot betrayal itself reads. waverers is
+      // likewise read off g2's final state throughout -- no onBand op in the
+      // current vocabulary touches claimCircle/claimBp/loyalty/imprisoned,
+      // but nothing here assumes that will always stay true.
+      //
+      // One additional event, `claim.swayed`, parented to the flashpoint
+      // event alone (D14 cleanliness: the chronicle separates the roll
+      // itself from its social aftershock, rather than growing
+      // claim.flashpoint's own data with a second, unrelated concern) --
+      // never emitted when nobody actually qualifies (fingerprintDecayStep's
+      // own "no fades, no event" precedent, systems.ts). `direction` names
+      // which way THIS batch moved: 'toward' only ever accompanies the
+      // waverers-only +800 leg; 'away' accompanies the declared-backers-
+      // plus-waverers -400 leg -- the two legs never fire on the same
+      // resolution (a band is exactly one of triumph/costly/rout/setback),
+      // so one direction per event is always exact, never a summary of a
+      // mix.
+      //
+      // Every write here is a plain node.set (never an increment): the SAME
+      // character nudged by a second flashpoint before decay clears the
+      // first OVERWRITES, never stacks (Global Constraints, verbatim: "a
+      // nudge never stacks with itself") -- and since a waverer (no backing
+      // edge, isWaverer's own first gate) and a declared backer (has one)
+      // are mutually exclusive by construction, declaredBackers and
+      // waverers below can never name the same character twice either, so a
+      // plain concat+sort (no dedup) is exact.
+      if (band === 'triumph' || band === 'costly') {
+        const waverers = nodeIds(g2).filter((id) => isWaverer(g2, id, rulerId));
+        if (waverers.length > 0) {
+          const nudgeDeltas: GraphDelta[] = waverers.flatMap((charId): GraphDelta[] => [
+            { op: 'node.set', id: charId, key: 'claimNudge', value: 800 },
+            { op: 'node.set', id: charId, key: 'claimNudgeAt', value: tick },
+          ]);
+          g2 = applyDeltas(g2, nudgeDeltas);
+          em.emit('claim.swayed', { parents: [flashpointEvent.id], data: { charIds: waverers, direction: 'toward' }, deltas: nudgeDeltas });
+        }
+      } else if (band === 'rout' || band === 'setback') {
+        const declaredBackers = edgesOfType(g2, 'backing').map((e) => e.src);
+        const waverers = nodeIds(g2).filter((id) => isWaverer(g2, id, rulerId));
+        const affected = [...declaredBackers, ...waverers].sort();
+        if (affected.length > 0) {
+          const nudgeDeltas: GraphDelta[] = affected.flatMap((charId): GraphDelta[] => [
+            { op: 'node.set', id: charId, key: 'claimNudge', value: -400 },
+            { op: 'node.set', id: charId, key: 'claimNudgeAt', value: tick },
+          ]);
+          g2 = applyDeltas(g2, nudgeDeltas);
+          em.emit('claim.swayed', { parents: [flashpointEvent.id], data: { charIds: affected, direction: 'away' }, deltas: nudgeDeltas });
+        }
       }
 
       return g2;

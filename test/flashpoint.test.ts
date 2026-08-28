@@ -18,8 +18,9 @@ import { fx } from '../src/fx.js';
 import { makeFortune } from '../src/fortune.js';
 import { addEdge, addNode, emptyGraph, findEdge, getNode, propFx } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
-import { applyOp, DEEDS, OP_KINDS, TREACHERY_BP, validateOp } from '../src/ops.js';
+import { applyOp, DEEDS, OP_KINDS, TREACHERY_BP, WAVERER_FLOOR, validateOp } from '../src/ops.js';
 import type { FlashpointDef, Op, Term } from '../src/ops.js';
+import { CLAIM_NUDGE_TICKS, claimNudgeDecayStep, DECLARE_LOYALTY, declarationStep } from '../src/systems.js';
 import { initialState, resolveTick } from '../src/tick.js';
 import type { SeasonConfig } from '../src/tick.js';
 
@@ -56,6 +57,27 @@ function withBacker(
   g = addEdge(g, { type: 'backing', src: charId, dst: 'inst:crown', props: { declaredAt: 0, bp, viaPromise: '' } });
   if (opts.loyalty !== undefined) g = addEdge(g, { type: 'loyalty', src: charId, dst: 'char:ruler', props: { bp: opts.loyalty } });
   if (opts.grudge) g = addEdge(g, { type: 'grudge', src: charId, dst: 'char:ruler', props: { bp: 1000 } });
+  return g;
+}
+
+/** Task 4 (momentum): adds one claim-circle character with NO backing edge
+ *  -- a momentum candidate, never a declared backer (contrast with
+ *  withBacker above). Sated by default (wantChain/wantIndex, T1's own
+ *  "price already answered" fixture idiom) so every momentum test below
+ *  isolates to the loyalty axis alone; claimBp is present only because the
+ *  circle AND-definition requires it (never itself read by momentum). */
+function withCircle(
+  g: WorldGraph,
+  charId: string,
+  opts: { loyalty?: number; imprisoned?: boolean; claimBp?: number } = {},
+): WorldGraph {
+  const props: Record<string, boolean | number | string | string[]> = {
+    name: charId, claimCircle: true, claimBp: opts.claimBp ?? 1000,
+    wantChain: ['coin'], wantIndex: 1,
+  };
+  if (opts.imprisoned) props['imprisoned'] = true;
+  g = addNode(g, { id: charId, type: 'character', props });
+  if (opts.loyalty !== undefined) g = addEdge(g, { type: 'loyalty', src: charId, dst: 'char:ruler', props: { bp: opts.loyalty } });
   return g;
 }
 
@@ -666,5 +688,405 @@ describe('press_claim: wired into resolveTick (season-access seam, end to end)',
       seatId: 'seat:throne',
       choices: [{ briefId: pendingBrief.briefId, ops: [{ kind: 'press_claim', flashpointId: 'fp-does-not-exist' }] }],
     }, fortune)).toThrow(/bad op/); // validateDecisions catches it at the wire gate; resolveTick's standard `resolveTick: ${error}` wrap
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 4 (2026-08-20 claim plan, Global Constraints -- momentum): a
+// flashpoint's outcome sways hearts still undecided. A "waverer" is a claim-
+// circle character (declarationStep's own claimCircle===true AND
+// claimBp:number AND) with NO backing edge yet, not imprisoned, holding a
+// real loyalty edge to the ruler, whose EFFECTIVE loyalty (systems.ts's
+// exported effectiveLoyalty -- the SAME formula/threshold declarationStep
+// itself reads, reused verbatim rather than re-derived) sits in
+// [WAVERER_FLOOR, DECLARE_LOYALTY) = [4000, 5500). On triumph/costly, every
+// waverer's claimNudge is set to +800; on rout/setback, every waverer AND
+// every character still holding a backing edge (read AFTER betrayal --
+// claim §3's own unmasked false stone already lost its edge and paid its own
+// harsher price, so it does not also eat this) gets claimNudge = -400.
+// Always a plain node.set (never +=): a second flashpoint before decay
+// clears the first OVERWRITES, never stacks. Decayed by claimNudgeDecayStep
+// (systems.ts, CLAIM_NUDGE_TICKS = 4) -- fingerprintDecayStep's own
+// discipline mirrored exactly: order-stable, one event carrying every fade,
+// none when nothing faded, no `parents`.
+//
+// The nudge write rides ONE additional event, `claim.swayed`, parented to
+// the flashpoint event alone -- D14 cleanliness: the chronicle separates the
+// roll (claim.flashpoint) from its social aftershock (claim.swayed) rather
+// than growing the roll's own data with a second, unrelated concern.
+// data: { charIds: string[] (sorted), direction: 'toward' | 'away' } --
+// 'toward' only ever accompanies triumph/costly's waverers-only nudge;
+// 'away' accompanies rout/setback's declared-backers+waverers nudge. Never
+// emitted when nobody qualifies (fingerprintDecayStep's own "no fades, no
+// event" precedent).
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// (a) costly/triumph nudges exactly the waverer band (+800): a waverer gets
+// it, a silent char (below WAVERER_FLOOR) does not, a declared backer does
+// not either (the +800 leg names waverers only, never backers).
+// ---------------------------------------------------------------------------
+describe('press_claim: momentum (a) triumph/costly nudges exactly the waverer band', () => {
+  it('triumph: a waverer (effective 4500) gets claimNudge=+800; a silent char (effective 3000) and a declared backer are untouched', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 }); // declared, loyal (never a false stone); also drives r huge -> r>=1500 row
+    g = withCircle(g, 'char:waverer', { loyalty: 4500 }); // effective 4500 -- in [4000,5500)
+    g = withCircle(g, 'char:silent', { loyalty: 3000 }); // effective 3000 -- below WAVERER_FLOOR
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2, em, flashpointEvent } = pressClaim(g, def, R1500_TRIUMPH);
+    expect((flashpointEvent.data as { band: string }).band).toBe('triumph');
+
+    expect(getNode(g2, 'char:waverer').props['claimNudge']).toBe(800);
+    expect(getNode(g2, 'char:waverer').props['claimNudgeAt']).toBe(R1500_TRIUMPH.tick);
+    expect(getNode(g2, 'char:silent').props['claimNudge']).toBeUndefined();
+    expect(getNode(g2, 'char:backer').props['claimNudge']).toBeUndefined(); // declared backers never get the +800 leg
+
+    const swayedEv = em.all().find((e) => e.type === 'claim.swayed');
+    expect(swayedEv).toBeDefined();
+    expect(swayedEv?.data).toEqual({ charIds: ['char:waverer'], direction: 'toward' });
+    expect(swayedEv?.parents).toEqual([flashpointEvent.id]);
+    expect(swayedEv?.deltas).toEqual([
+      { op: 'node.set', id: 'char:waverer', key: 'claimNudge', value: 800 },
+      { op: 'node.set', id: 'char:waverer', key: 'claimNudgeAt', value: R1500_TRIUMPH.tick },
+    ]);
+
+    const replayed = applyDeltas(g, em.all().flatMap((e) => e.deltas));
+    expect(hashValue(replayed)).toBe(hashValue(g2));
+  });
+
+  it('waverer band boundaries: exactly WAVERER_FLOOR (4000) is nudged; one bp under DECLARE_LOYALTY (5499) is nudged; exactly DECLARE_LOYALTY (5500, already declare-eligible) is NOT -- the band is half-open [4000, 5500)', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:atfloor', { loyalty: WAVERER_FLOOR }); // exactly 4000
+    g = withCircle(g, 'char:atceiling', { loyalty: DECLARE_LOYALTY - 1 }); // 5499
+    g = withCircle(g, 'char:overceiling', { loyalty: DECLARE_LOYALTY }); // 5500 -- already declare-eligible, not a "waverer"
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2 } = pressClaim(g, def, R1500_TRIUMPH);
+
+    expect(getNode(g2, 'char:atfloor').props['claimNudge']).toBe(800);
+    expect(getNode(g2, 'char:atceiling').props['claimNudge']).toBe(800);
+    expect(getNode(g2, 'char:overceiling').props['claimNudge']).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (b) rout/setback nudges declared backers AND waverers -400; a silent char
+// stays untouched; a false stone unmasked by the SAME rout does not also eat
+// the momentum penalty (betrayal already cost them their backing edge and
+// paid its own, harsher, price).
+// ---------------------------------------------------------------------------
+describe('press_claim: momentum (b) rout/setback nudges declared backers AND waverers -400', () => {
+  it('rout: a declared backer and a waverer both get claimNudge=-400; a silent char is untouched; one claim.swayed event names both, sorted, direction "away"', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withBacker(g, 'char:backer', 2000, { loyalty: 6000 }); // loyal -- never a false stone
+    g = withCircle(g, 'char:waverer', { loyalty: 4500 });
+    g = withCircle(g, 'char:silent', { loyalty: 3000 });
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2, em, flashpointEvent } = pressClaim(g, def, ELSE_ROUT);
+    expect((flashpointEvent.data as { band: string }).band).toBe('rout');
+
+    expect(getNode(g2, 'char:backer').props['claimNudge']).toBe(-400);
+    expect(getNode(g2, 'char:backer').props['claimNudgeAt']).toBe(ELSE_ROUT.tick);
+    expect(getNode(g2, 'char:waverer').props['claimNudge']).toBe(-400);
+    expect(getNode(g2, 'char:silent').props['claimNudge']).toBeUndefined();
+
+    const swayedEv = em.all().find((e) => e.type === 'claim.swayed');
+    expect(swayedEv?.data).toEqual({ charIds: ['char:backer', 'char:waverer'], direction: 'away' });
+    expect(swayedEv?.parents).toEqual([flashpointEvent.id]);
+    expect(swayedEv?.deltas).toHaveLength(4); // 2 props x 2 chars
+
+    const replayed = applyDeltas(g, em.all().flatMap((e) => e.deltas));
+    expect(hashValue(replayed)).toBe(hashValue(g2));
+  });
+
+  it('setback: the same -400 leg fires on setback too (not rout-only)', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withCircle(g, 'char:waverer', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2, flashpointEvent } = pressClaim(g, def, ELSE_SETBACK);
+    expect((flashpointEvent.data as { band: string }).band).toBe('setback');
+    expect(getNode(g2, 'char:waverer').props['claimNudge']).toBe(-400);
+  });
+
+  it('a false stone unmasked by THIS SAME rout does not also eat the momentum penalty -- betrayal already cost them their backing edge; nobody else qualifies, so claim.swayed does not even fire', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withBacker(g, 'char:traitor', 2000, { loyalty: 1000, cunning: true }); // false stone -- unmasked on rout
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2, em, flashpointEvent } = pressClaim(g, def, ELSE_ROUT);
+    expect((flashpointEvent.data as { band: string }).band).toBe('rout');
+    expect(em.all().find((e) => e.type === 'claim.betrayed')?.data).toEqual({ charId: 'char:traitor' });
+    expect(findEdge(g2, 'backing', 'char:traitor', 'inst:crown')).toBeUndefined(); // unmasked, edge gone
+
+    expect(getNode(g2, 'char:traitor').props['claimNudge']).toBeUndefined(); // NOT also nudged
+    expect(em.all().find((e) => e.type === 'claim.swayed')).toBeUndefined(); // no-op guard: nobody qualifies
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (c) claimNudgeDecayStep: mirrors fingerprintDecayStep's own test precedent
+// (test/fingerprints.test.ts) almost line for line -- same shape, its own
+// props (claimNudge/claimNudgeAt) and its own window (CLAIM_NUDGE_TICKS=4).
+// ---------------------------------------------------------------------------
+describe('press_claim: momentum (c) claimNudgeDecayStep (CLAIM_NUDGE_TICKS = 4)', () => {
+  it('CLAIM_NUDGE_TICKS is exactly 4', () => {
+    expect(CLAIM_NUDGE_TICKS).toBe(4);
+  });
+
+  it('nudged at t (via a real triumph): still present at t+4, cleared (both props) at t+5, with claim.nudge.faded carrying it and replay reproducing', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:wavering', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2: nudged } = pressClaim(g, def, R1500_TRIUMPH); // tick 2
+    expect(getNode(nudged, 'char:wavering').props['claimNudge']).toBe(800);
+    expect(getNode(nudged, 'char:wavering').props['claimNudgeAt']).toBe(R1500_TRIUMPH.tick);
+
+    // t+4: (6-2)=4, not > 4 -- still present, decay pass is a no-op.
+    const stillTick = R1500_TRIUMPH.tick + CLAIM_NUDGE_TICKS;
+    const emStill = makeEmitter(stillTick);
+    const still = claimNudgeDecayStep(nudged, stillTick, emStill);
+    expect(getNode(still, 'char:wavering').props['claimNudge']).toBe(800);
+    expect(getNode(still, 'char:wavering').props['claimNudgeAt']).toBe(R1500_TRIUMPH.tick);
+    expect(emStill.all()).toHaveLength(0);
+    expect(hashValue(still)).toBe(hashValue(nudged));
+
+    // t+5: (7-2)=5 > 4 -- cleared.
+    const fadeTick = R1500_TRIUMPH.tick + CLAIM_NUDGE_TICKS + 1;
+    const emFade = makeEmitter(fadeTick);
+    const faded = claimNudgeDecayStep(nudged, fadeTick, emFade);
+    expect(getNode(faded, 'char:wavering').props['claimNudge']).toBe(0);
+    expect(getNode(faded, 'char:wavering').props['claimNudgeAt']).toBe(-1);
+
+    const ev = emFade.all().find((e) => e.type === 'claim.nudge.faded');
+    expect(ev).toBeDefined();
+    expect(ev!.parents).toEqual([]);
+    expect(ev!.data['fades']).toEqual([{ charId: 'char:wavering', at: R1500_TRIUMPH.tick }]);
+
+    const replayed = applyDeltas(nudged, ev!.deltas);
+    expect(hashValue(replayed)).toBe(hashValue(faded));
+  });
+
+  it('multiple simultaneous fades collapse into ONE claim.nudge.faded event, order-stable by node id', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withCircle(g, 'char:bbb', { loyalty: 4500 });
+    g = withCircle(g, 'char:aaa', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2: nudged } = pressClaim(g, def, ELSE_ROUT); // tick 0, rout -- both nudged -400 at once
+    expect(getNode(nudged, 'char:aaa').props['claimNudge']).toBe(-400);
+    expect(getNode(nudged, 'char:bbb').props['claimNudge']).toBe(-400);
+
+    const fadeTick = ELSE_ROUT.tick + CLAIM_NUDGE_TICKS + 1;
+    const em = makeEmitter(fadeTick);
+    claimNudgeDecayStep(nudged, fadeTick, em);
+    const events = em.all();
+    expect(events).toHaveLength(1);
+    const fades = events[0]!.data['fades'] as Array<{ charId: string; at: number }>;
+    expect(fades.map((f) => f.charId)).toEqual(['char:aaa', 'char:bbb']); // sorted
+    expect(events[0]!.deltas).toHaveLength(4); // 2 props x 2 fades
+  });
+
+  it('a never-nudged character is inert to decay: no fade, no event, graph unchanged', () => {
+    let g = crownGraph();
+    g = withCircle(g, 'char:untouched', { loyalty: 4500 });
+    const em = makeEmitter(100);
+    const out = claimNudgeDecayStep(g, 100, em);
+    expect(em.all()).toHaveLength(0);
+    expect(hashValue(out)).toBe(hashValue(g));
+  });
+
+  it('an already-decayed nudge does not re-fade on a later pass (no repeat events)', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:wavering', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2: nudged } = pressClaim(g, def, R1500_TRIUMPH);
+    const fadeTick = R1500_TRIUMPH.tick + CLAIM_NUDGE_TICKS + 1;
+    const oncefaded = claimNudgeDecayStep(nudged, fadeTick, makeEmitter(fadeTick));
+    const laterTick = fadeTick + 20;
+    const em2 = makeEmitter(laterTick);
+    const twicefaded = claimNudgeDecayStep(oncefaded, laterTick, em2);
+    expect(em2.all()).toHaveLength(0); // claimNudge===0 never re-qualifies -- gated on nudgeVal !== 0
+    expect(hashValue(twicefaded)).toBe(hashValue(oncefaded));
+  });
+
+  it('determinism: decay of the same input at the same tick is bit-identical across two independent calls', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:wavering', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2: nudged } = pressClaim(g, def, R1500_TRIUMPH);
+    const fadeTick = R1500_TRIUMPH.tick + CLAIM_NUDGE_TICKS + 1;
+    const a = claimNudgeDecayStep(nudged, fadeTick, makeEmitter(fadeTick));
+    const b = claimNudgeDecayStep(nudged, fadeTick, makeEmitter(fadeTick));
+    expect(hashValue(a)).toBe(hashValue(b));
+  });
+
+  it('momentum is temporary: after decay, a waverer whose UN-nudged baseline sits below DECLARE_LOYALTY falls back out of reach', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:brink', { loyalty: 4999 }); // 4999+800=5799 while nudged; 4999 alone stays under 5500
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2: nudged } = pressClaim(g, def, R1500_TRIUMPH);
+    expect(getNode(nudged, 'char:brink').props['claimNudge']).toBe(800);
+
+    const fadeTick = R1500_TRIUMPH.tick + CLAIM_NUDGE_TICKS + 1;
+    const faded = claimNudgeDecayStep(nudged, fadeTick, makeEmitter(fadeTick));
+    expect(getNode(faded, 'char:brink').props['claimNudge']).toBe(0);
+
+    // Confirmed via the real declaration pass: WITH the nudge still live
+    // they would have declared; once it decays, they no longer do (the
+    // baseline true loyalty 4999 alone never cleared DECLARE_LOYALTY).
+    const post = declarationStep(faded, fadeTick + 1, makeEmitter(fadeTick + 1));
+    expect(findEdge(post, 'backing', 'char:brink', 'inst:crown')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (d) overwrite, not stack: two flashpoints inside the decay window leave
+// only the LATEST nudge value -- never a sum.
+// ---------------------------------------------------------------------------
+describe('press_claim: momentum (d) overwrite-not-stack (Global Constraints, verbatim: "never stacks with itself")', () => {
+  it('triumph (+800) then setback (-400) one tick later: the second OVERWRITES the first -- claimNudge ends at -400, not +400', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 }); // r>=1500 driver for round 1
+    g = withCircle(g, 'char:wavering', { loyalty: 4500 }); // stays a waverer across both: 4500, then 4500+800=5300 (<5500) while nudged
+
+    const def1: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2: afterFirst } = pressClaim(g, def1, R1500_TRIUMPH); // tick 2, triumph
+    expect(getNode(afterFirst, 'char:wavering').props['claimNudge']).toBe(800);
+    expect(getNode(afterFirst, 'char:wavering').props['claimNudgeAt']).toBe(2);
+
+    const def2: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2: afterSecond, flashpointEvent: secondEvent } = pressClaim(afterFirst, def2, ELSE_SETBACK); // tick 3, setback
+    expect((secondEvent.data as { band: string }).band).toBe('setback');
+
+    expect(getNode(afterSecond, 'char:wavering').props['claimNudge']).toBe(-400); // NOT 800 + -400 = 400
+    expect(getNode(afterSecond, 'char:wavering').props['claimNudgeAt']).toBe(3); // latest tick, not the first
+  });
+
+  it('triumph then triumph again: the second +800 overwrites the first +800 -- same value, but a fresh write, not a stale one silently kept', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:wavering', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2: afterFirst, flashpointEvent: firstEvent } = pressClaim(g, def, R1500_TRIUMPH); // tick 2
+    expect((firstEvent.data as { band: string }).band).toBe('triumph');
+    expect(getNode(afterFirst, 'char:wavering').props['claimNudgeAt']).toBe(2);
+
+    // Same pin reused (pure function of seed/tick/key -- draws the identical
+    // roll, still triumph) to simulate a second landing without needing a
+    // second brute-forced seed.
+    const { g2: afterSecond, flashpointEvent: secondEvent } = pressClaim(afterFirst, def, R1500_TRIUMPH);
+    expect((secondEvent.data as { band: string }).band).toBe('triumph');
+    expect(getNode(afterSecond, 'char:wavering').props['claimNudge']).toBe(800);
+    expect(getNode(afterSecond, 'char:wavering').props['claimNudgeAt']).toBe(2); // same tick pin, so unchanged here -- (d)'s OTHER test pins the cross-tick case
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (e) anti-farm: a silent char (effective < WAVERER_FLOOR) can never be
+// nudged into declaring. Excluded from the waverer band entirely -- not
+// merely "nudged but still short" -- and the arithmetic is pinned explicitly
+// per the brief's own instruction even so.
+// ---------------------------------------------------------------------------
+describe('press_claim: momentum (e) anti-farm -- nudges alone never bridge a silent character to declaring', () => {
+  it('effective 3999 (one bp under WAVERER_FLOOR): excluded from the waverer band -- 3 consecutive triumphs (the "farm" always landing) leave claimNudge permanently absent', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:silent', { loyalty: WAVERER_FLOOR - 1 }); // 3999
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+
+    let cur = g;
+    for (let i = 0; i < 3; i++) {
+      const { g2, flashpointEvent } = pressClaim(cur, def, R1500_TRIUMPH);
+      expect((flashpointEvent.data as { band: string }).band).toBe('triumph');
+      expect(getNode(g2, 'char:silent').props['claimNudge']).toBeUndefined();
+      cur = g2;
+    }
+
+    // Pin the arithmetic explicitly (brief's own instruction): even in the
+    // counterfactual where the band exclusion above did not exist and a
+    // silent character received the +800 nudge anyway, it still could not
+    // have bridged them to DECLARE_LOYALTY in one hop -- the exclusion is
+    // belt, this arithmetic is suspenders.
+    expect((WAVERER_FLOOR - 1) + 800).toBe(4799);
+    expect(4799).toBeLessThan(DECLARE_LOYALTY);
+  });
+
+  it('CONTRAST: a waverer at 4999 (brief\'s own pinned example) + triumph -> 5799, now >= DECLARE_LOYALTY -- the designed conversion, confirmed real by actually declaring on the next declarationStep pass', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:brink', { loyalty: 4999 });
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2 } = pressClaim(g, def, R1500_TRIUMPH);
+    expect(getNode(g2, 'char:brink').props['claimNudge']).toBe(800);
+    expect(4999 + 800).toBe(5799);
+    expect(5799).toBeGreaterThanOrEqual(DECLARE_LOYALTY);
+
+    const post = declarationStep(g2, R1500_TRIUMPH.tick + 1, makeEmitter(R1500_TRIUMPH.tick + 1));
+    expect(findEdge(post, 'backing', 'char:brink', 'inst:crown')).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exclusions (mirrors declarationStep's own, controller adjudication
+// 2026-08-27): a character who could never declare is never nudged toward
+// or away from doing so either -- inert either way, but untidy to leave
+// unguarded.
+// ---------------------------------------------------------------------------
+describe('press_claim: momentum exclusions (imprisoned / no loyalty edge) -- mirrors declarationStep', () => {
+  it('an imprisoned circle character in the waverer band is never nudged on triumph', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = withCircle(g, 'char:jailed', { loyalty: 4500, imprisoned: true });
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2 } = pressClaim(g, def, R1500_TRIUMPH);
+    expect(getNode(g2, 'char:jailed').props['claimNudge']).toBeUndefined();
+  });
+
+  it('an imprisoned circle character in the waverer band is never nudged on rout either (holds no backing edge, so the declared-backer leg does not apply)', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withCircle(g, 'char:jailed', { loyalty: 4500, imprisoned: true });
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2 } = pressClaim(g, def, ELSE_ROUT);
+    expect(getNode(g2, 'char:jailed').props['claimNudge']).toBeUndefined();
+  });
+
+  it('a circle character with NO loyalty edge at all is never nudged -- cannot declare regardless, matching the declaration pass\'s own exclusion', () => {
+    let g = crownGraph();
+    g = withBacker(g, 'char:backer', 10000, { loyalty: 6000 });
+    g = addNode(g, { id: 'char:noedge', type: 'character', props: { name: 'No Edge', claimCircle: true, claimBp: 500, wantChain: ['coin'], wantIndex: 1 } });
+    const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
+    const { g2 } = pressClaim(g, def, R1500_TRIUMPH);
+    expect(getNode(g2, 'char:noedge').props['claimNudge']).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f) determinism + replay, exercising the momentum path specifically (both
+// nudge groups active on the same resolution).
+// ---------------------------------------------------------------------------
+describe('press_claim: momentum (f) determinism + replay', () => {
+  it('two independent resolutions from the same pre-state, exercising both nudge groups on a setback, produce byte-identical graphs and event logs; replaying every landed delta reproduces the post-state exactly', () => {
+    let g0 = crownGraph({ alwaysTrue: true });
+    g0 = withBacker(g0, 'char:backer', 2000, { loyalty: 6000 });
+    g0 = withCircle(g0, 'char:waverer', { loyalty: 4500 });
+    g0 = withCircle(g0, 'char:silent', { loyalty: 2000 });
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+
+    const runA = pressClaim(g0, def, ELSE_SETBACK);
+    const runB = pressClaim(g0, def, ELSE_SETBACK);
+    expect((runA.flashpointEvent.data as { band: string }).band).toBe('setback');
+
+    expect(hashValue(runA.g2)).toBe(hashValue(runB.g2));
+    expect(runA.em.all().map((e) => ({ type: e.type, data: e.data, deltas: e.deltas, parents: e.parents })))
+      .toEqual(runB.em.all().map((e) => ({ type: e.type, data: e.data, deltas: e.deltas, parents: e.parents })));
+
+    const replayed = applyDeltas(g0, runA.em.all().flatMap((e) => e.deltas));
+    expect(hashValue(replayed)).toBe(hashValue(runA.g2));
+
+    const swayedEv = runA.em.all().find((e) => e.type === 'claim.swayed');
+    expect(swayedEv?.data).toEqual({ charIds: ['char:backer', 'char:waverer'], direction: 'away' });
+    expect(getNode(runA.g2, 'char:silent').props['claimNudge']).toBeUndefined();
   });
 });

@@ -349,6 +349,64 @@ export function fingerprintDecayStep(g0: WorldGraph, tick: number, em: Emitter):
   return g;
 }
 
+// Claim §3/momentum (2026-08-20 claim plan, Global Constraints): claimNudge
+// decay. Adjacent to fingerprintDecayStep just above for the same reason
+// debtOverdueStep sits adjacent to it too -- claimNudge/claimNudgeAt are
+// disjoint from every prop any other systemic pass touches, so ordering
+// among these three only ever affects which of this tick's events sort
+// first, never the outcome. Mirrors fingerprintDecayStep's own discipline
+// exactly: order-stable nodeIds(g) iteration, one event per tick carrying
+// EVERY fade, no event at all when nothing faded, `parents` never set (a
+// systemic pass is never player-descended, T2's ancestry invariant) -- but
+// its own prop pair and its own window: the plan's own literal text (Global
+// Constraints) sets CLAIM_NUDGE_TICKS to 4 independently of
+// FINGERPRINT_TICKS' 3, and there is exactly one "deed" here (no DEED_NAMES-
+// style family to loop over), so the gate checks a single named prop pair
+// rather than iterating a closed list.
+//
+// "Clearing" mirrors fingerprintDecayStep's own idiom, adapted to a NUMBER
+// prop rather than a string one: claimNudge -> 0 (the exact value
+// effectiveLoyalty's own defensive read above already treats an absent
+// claimNudge as, so a decayed nudge and a never-nudged character become
+// indistinguishable to every later reader -- including ops.ts's isWaverer,
+// which reads claimNudge only indirectly, through effectiveLoyalty) and
+// claimNudgeAt -> -1 (fingerprintDecayStep's own "a tick that can never
+// legitimately occur" sentinel, verbatim). The gate gives claimNudge itself
+// first refusal (nudgeVal === 0 short-circuits before :at is even read),
+// mirroring fingerprintDecayStep's own seatVal-first order -- valid nudge
+// values are only ever +800/-400 (Global Constraints), so 0 is
+// unambiguously "never nudged, or already decayed" and the CONDITION can
+// never re-fire once it has.
+//
+// Fade records carry only { charId, at }: unlike a deed fingerprint (which
+// needs `deed` to say WHICH of several stamps decayed, and `seatId` to
+// preserve who caused it), there is exactly one nudge concept per
+// character and no actor to attribute it to at decay time -- the STALE
+// nudge's own sign (whether it had favored or soured the claim) is already
+// on the record via the earlier claim.swayed event this same character
+// appeared in, so it is not duplicated here.
+export const CLAIM_NUDGE_TICKS = 4;
+
+export function claimNudgeDecayStep(g0: WorldGraph, tick: number, em: Emitter): WorldGraph {
+  let g = g0;
+  const deltas: GraphDelta[] = [];
+  const fades: Array<{ charId: string; at: number }> = [];
+  for (const id of nodeIds(g)) {
+    const props = getNode(g, id).props;
+    const nudgeVal = props['claimNudge'];
+    if (typeof nudgeVal !== 'number' || nudgeVal === 0) continue; // never nudged, or already decayed
+    const atVal = props['claimNudgeAt'];
+    if (typeof atVal !== 'number' || tick - atVal <= CLAIM_NUDGE_TICKS) continue;
+    deltas.push({ op: 'node.set', id, key: 'claimNudge', value: 0 });
+    deltas.push({ op: 'node.set', id, key: 'claimNudgeAt', value: -1 });
+    fades.push({ charId: id, at: atVal });
+  }
+  if (fades.length === 0) return g;
+  g = applyDeltas(g, deltas);
+  em.emit('claim.nudge.faded', { deltas, data: { fades } });
+  return g;
+}
+
 // Renderer-law T2 (debt-mechanism preamble): debt overdue pass. Mirrors
 // fingerprintDecayStep's discipline just above -- deterministic,
 // fortune-free, order-stable iteration (edgesOfType(g, 'debt') is already
@@ -471,7 +529,19 @@ export function debtOverdueStep(g0: WorldGraph, tick: number, em: Emitter): Worl
 // decision lives exactly once, at declarationStep's own call site below --
 // this function is never the place a "no edge" case could quietly default
 // to neutral again.
-function effectiveLoyalty(g: WorldGraph, charId: string, trueLoyaltyBp: number): number {
+// Exported (2026-08-27, Task 4/momentum): ops.ts's press_claim resolution
+// needs this SAME formula to decide who is a "waverer" (Global Constraints:
+// effective loyalty in [WAVERER_FLOOR, DECLARE_LOYALTY)) -- reused verbatim
+// here rather than re-derived a second place, per the task brief's own
+// instruction, so the waverer band and the declare threshold can never
+// drift apart. Creates a real, function-declaration-only import cycle with
+// ops.ts (which already exports DEED_NAMES/FINGERPRINT_TICKS back to this
+// file) -- safe under Node's ESM live bindings because BOTH sides only ever
+// read the other module's binding from inside a function body (never at
+// either module's own top level), so neither module needs the other to have
+// finished initializing before it can finish its own; see this task's
+// report for the fuller reasoning.
+export function effectiveLoyalty(g: WorldGraph, charId: string, trueLoyaltyBp: number): number {
   // claimNudge: a char prop written by momentum (Task 4); absent (this
   // task, and any character Task 4 has never touched) reads as 0 -- the
   // same "absent means the neutral default" idiom aptOf/loyaltyBp/wealthOf
