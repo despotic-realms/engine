@@ -164,6 +164,16 @@ function departureDeltas(g: WorldGraph, charId: string, rulerId: string): GraphD
   }
   const loyaltyEdge = findEdge(g, 'loyalty', charId, rulerId);
   if (loyaltyEdge) deltas.push({ op: 'edge.remove', id: loyaltyEdge.id });
+  // Claim §1 (2026-08-20 claim plan, Global Constraints): a `backing` edge
+  // is the character's public declaration for the ruler's claim --
+  // departing to the rival's court withdraws it, same as the loyalty edge
+  // just above. Existence-guarded like every edge here (findEdge), so a
+  // SECOND arc's terminal stage landing on an already-departed character in
+  // the same advanceCharacterArcs call (this file's own same-tick
+  // restless+scheme safety property) finds nothing left to remove and
+  // builds no redundant edge.remove delta.
+  const backingEdge = findEdge(g, 'backing', charId, 'inst:crown');
+  if (backingEdge) deltas.push({ op: 'edge.remove', id: backingEdge.id });
   deltas.push({ op: 'node.set', id: charId, key: 'inRivalCourt', value: true });
   return deltas;
 }

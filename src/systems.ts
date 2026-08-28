@@ -18,7 +18,14 @@ import { clampFx, divFx, fx, fxFromInt, fxToString, fxWhole, mulFx, FX_ONE, FX_Z
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
 import { appendAllegianceLog, edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, foldAllegianceDrift, getNode, nodeIds, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
+// Claim §1-3/momentum: the shared effective-loyalty formula and its declare
+// threshold, relocated to this leaf module (2026-08-28, review fix) so this
+// file and ops.ts (press_claim's own isWaverer, same formula/threshold)
+// share one dependency instead of importing from each other -- see
+// loyalty.ts's own header.
+import { DECLARE_LOYALTY, effectiveLoyalty } from './loyalty.js';
 import { DEED_NAMES, FINGERPRINT_TICKS } from './ops.js';
+import { currentWant } from './spine.js';
 
 const UNREST_MAX = fx('100');
 
@@ -348,6 +355,64 @@ export function fingerprintDecayStep(g0: WorldGraph, tick: number, em: Emitter):
   return g;
 }
 
+// Claim §3/momentum (2026-08-20 claim plan, Global Constraints): claimNudge
+// decay. Adjacent to fingerprintDecayStep just above for the same reason
+// debtOverdueStep sits adjacent to it too -- claimNudge/claimNudgeAt are
+// disjoint from every prop any other systemic pass touches, so ordering
+// among these three only ever affects which of this tick's events sort
+// first, never the outcome. Mirrors fingerprintDecayStep's own discipline
+// exactly: order-stable nodeIds(g) iteration, one event per tick carrying
+// EVERY fade, no event at all when nothing faded, `parents` never set (a
+// systemic pass is never player-descended, T2's ancestry invariant) -- but
+// its own prop pair and its own window: the plan's own literal text (Global
+// Constraints) sets CLAIM_NUDGE_TICKS to 4 independently of
+// FINGERPRINT_TICKS' 3, and there is exactly one "deed" here (no DEED_NAMES-
+// style family to loop over), so the gate checks a single named prop pair
+// rather than iterating a closed list.
+//
+// "Clearing" mirrors fingerprintDecayStep's own idiom, adapted to a NUMBER
+// prop rather than a string one: claimNudge -> 0 (the exact value
+// effectiveLoyalty's own defensive read above already treats an absent
+// claimNudge as, so a decayed nudge and a never-nudged character become
+// indistinguishable to every later reader -- including ops.ts's isWaverer,
+// which reads claimNudge only indirectly, through effectiveLoyalty) and
+// claimNudgeAt -> -1 (fingerprintDecayStep's own "a tick that can never
+// legitimately occur" sentinel, verbatim). The gate gives claimNudge itself
+// first refusal (nudgeVal === 0 short-circuits before :at is even read),
+// mirroring fingerprintDecayStep's own seatVal-first order -- valid nudge
+// values are only ever +800/-400 (Global Constraints), so 0 is
+// unambiguously "never nudged, or already decayed" and the CONDITION can
+// never re-fire once it has.
+//
+// Fade records carry only { charId, at }: unlike a deed fingerprint (which
+// needs `deed` to say WHICH of several stamps decayed, and `seatId` to
+// preserve who caused it), there is exactly one nudge concept per
+// character and no actor to attribute it to at decay time -- the STALE
+// nudge's own sign (whether it had favored or soured the claim) is already
+// on the record via the earlier claim.swayed event this same character
+// appeared in, so it is not duplicated here.
+export const CLAIM_NUDGE_TICKS = 4;
+
+export function claimNudgeDecayStep(g0: WorldGraph, tick: number, em: Emitter): WorldGraph {
+  let g = g0;
+  const deltas: GraphDelta[] = [];
+  const fades: Array<{ charId: string; at: number }> = [];
+  for (const id of nodeIds(g)) {
+    const props = getNode(g, id).props;
+    const nudgeVal = props['claimNudge'];
+    if (typeof nudgeVal !== 'number' || nudgeVal === 0) continue; // never nudged, or already decayed
+    const atVal = props['claimNudgeAt'];
+    if (typeof atVal !== 'number' || tick - atVal <= CLAIM_NUDGE_TICKS) continue;
+    deltas.push({ op: 'node.set', id, key: 'claimNudge', value: 0 });
+    deltas.push({ op: 'node.set', id, key: 'claimNudgeAt', value: -1 });
+    fades.push({ charId: id, at: atVal });
+  }
+  if (fades.length === 0) return g;
+  g = applyDeltas(g, deltas);
+  em.emit('claim.nudge.faded', { deltas, data: { fades } });
+  return g;
+}
+
 // Renderer-law T2 (debt-mechanism preamble): debt overdue pass. Mirrors
 // fingerprintDecayStep's discipline just above -- deterministic,
 // fortune-free, order-stable iteration (edgesOfType(g, 'debt') is already
@@ -386,6 +451,156 @@ export function debtOverdueStep(g0: WorldGraph, tick: number, em: Emitter): Worl
       deltas,
       data: { lenderId: edge.dst, principal: fxToString(propFx(edge.props, 'principal')), fee: fxToString(propFx(edge.props, 'fee')) },
     });
+  }
+  return g;
+}
+
+// Claim §1-2 (2026-08-20 claim plan, Global Constraints -- verbatim-binding
+// shapes): the declaration pass. A "claim circle" character (node props
+// claimCircle === true AND claimBp: number, content-authored) DECLARES for
+// the ruler's claim -- a `backing` edge src charId -> dst inst:crown, props
+// { declaredAt: tick, bp: claimBp, viaPromise } -- the tick their price is
+// answered and their effective loyalty clears DECLARE_LOYALTY.
+//
+// Mirrors fingerprintDecayStep/debtOverdueStep's systemic-pass discipline
+// just above: deterministic, fortune-free (D21 -- flashpoint resolution,
+// Task 3, is the fortune-consuming world outcome; this pass is not one),
+// order-stable iteration (nodeIds(g) is already sorted), no `parents`
+// (systemic passes are never player-descended, T2's ancestry invariant).
+// One `claim.declared` event PER declaring character -- debtOverdueStep's
+// per-edge-emission precedent, not fingerprintDecayStep's single-event-
+// carries-everything precedent: each declaration is its own citable fact
+// (a future betrayal/report/attribution consumer needs to name THIS one),
+// the same reasoning debtOverdueStep's own header gives for emitting once
+// per overdue edge rather than bundling.
+//
+// "Price answered" is an OR across two paths (Global Constraints, and the
+// task brief's own literal resolution of the plan's prose): the character
+// has had ANY want fulfilled by this tick or earlier -- read as wantIndex >
+// 0, since tick.ts's advanceWants only ever increments this on a real
+// want.fulfilled, so a nonzero wantIndex can only exist for a character who
+// carries (or carried) a real wantChain; no separate "has a wantChain at
+// all" guard is needed -- OR an unbroken `promise` edge (inst:crown ->
+// charId, Task 2's `pledge` op; none exists in this wave's own vocabulary
+// yet, checked here per the plan's own instruction and exercised in
+// test/claim.test.ts by a hand-built edge) names their CURRENT want
+// specifically. A sated character (wantChain exhausted, currentWant null)
+// can never match a promise via this second path -- but by construction
+// they can only be sated after their wantIndex already advanced past every
+// entry, so the first path (wantIndex > 0) already covers them.
+//
+// Placement (tick.ts): immediately after socialStep, before
+// fingerprintDecayStep -- per the plan's explicit instruction. Originally
+// also justified as load-bearing for a same-tick interaction with
+// advanceCharacterArcs (character departure): a departing character's TRUE
+// loyalty is necessarily low that tick (arcs.ts's retention check already
+// ruled out >= 5500 true bp, or they'd have retained instead), but
+// EFFECTIVE loyalty (this pass's own formula) can still clear
+// DECLARE_LOYALTY on a large legitimacy bonus alone -- exactly the "false
+// stone" shape the plan's own betrayal mechanic (Task 3) is built around,
+// not a bug to design around. Running the pass AFTER advanceCharacterArcs
+// used to be a real bug for exactly this reason (a just-departed
+// character's loyalty edge is gone, and effectiveLoyalty would read the
+// neutral 5000 DEFAULT in its place). Controller adjudication (2026-08-27,
+// post-review) closed that hole a second, more robust way too -- see the
+// "Exclusions" paragraph below -- so this placement choice is now
+// defense-in-depth rather than the only thing standing between a defector
+// and a fresh declaration; it is kept because it is still correct and still
+// the plan's own instructed position. Placed before fingerprintDecayStep/
+// debtOverdueStep/advanceArcs too for the same reason those three sit
+// beside each other: fully disjoint prop/edge sets (claimCircle/claimBp/
+// backing/promise vs. recent:<deed> vs. debt-edge props vs. famine/
+// character-arc props), so ordering among THEM only affects which of this
+// tick's events sort first, never the outcome.
+//
+// Exclusions (controller adjudication, 2026-08-27, post-review): two gates
+// closed after the initial implementation was reviewed against the "false
+// stone" reasoning above. (1) Declaring REQUIRES an actual `loyalty` edge to
+// the ruler -- no default-5000 qualification. Without this, a departed
+// character (departureDeltas, arcs.ts, cuts their loyalty edge on the way
+// out) would read the neutral default and, on a high enough legitimacy
+// bonus alone, could "declare" for the crown from the rival's own court --
+// independent of this pass's placement relative to advanceCharacterArcs, and
+// closing the same hole for any FUTURE character who simply never had a
+// loyalty edge authored at all. (2) `imprisoned === true` characters never
+// declare -- a cell is not a court -- gated on the character's own prop, so
+// the exclusion is TEMPORARY by construction: `pardon` (ops.ts) flips
+// `imprisoned` back to false with no special-casing needed here, and the
+// very next tick's pass simply sees the flag cleared. Both pinned in
+// test/claim.test.ts's "exclusions" suite: the departed-re-declare repro,
+// and an imprisoned-then-pardoned character declaring only after the pardon.
+// effectiveLoyalty (the formula) and DECLARE_LOYALTY (its declare threshold)
+// used to live here, defined right above this point -- relocated to
+// loyalty.ts (2026-08-28, review fix on Task 4/momentum) so this file and
+// ops.ts share one leaf dependency instead of importing from each other;
+// see loyalty.ts's own header for the full reasoning (bands.ts is the
+// precedent) and the imports at the top of this file. Pure relocation: the
+// formula, the "takes an already-resolved trueLoyaltyBp so the loyalty-
+// edge-existence decision lives exactly once, at each caller's own site"
+// contract, and the 5500 threshold are all byte-identical to what shipped
+// in the original Task 4 commit, just no longer defined in this file.
+export function declarationStep(g0: WorldGraph, tick: number, em: Emitter): WorldGraph {
+  let g = g0;
+  const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');
+  for (const charId of nodeIds(g)) {
+    const node = getNode(g, charId);
+    if (node.type !== 'character') continue;
+    if (node.props['claimCircle'] !== true) continue; // circle definition is an AND -- both marks required
+    if (typeof node.props['claimBp'] !== 'number') continue;
+    // Controller adjudication (2026-08-27, post-review): a cell is not a
+    // court. Gated on the character's OWN `imprisoned` prop, so this is
+    // temporary by construction -- ops.ts's `pardon` flips it back to false
+    // with no special-casing needed here; the very next tick's pass simply
+    // sees the flag cleared and proceeds normally (test/claim.test.ts's
+    // "imprisoned then pardoned" pin).
+    if (node.props['imprisoned'] === true) continue;
+    if (findEdge(g, 'backing', charId, 'inst:crown')) continue; // already declared -- never re-processed, never retracted here
+
+    const wantIndexVal = node.props['wantIndex'];
+    const wantIndex = typeof wantIndexVal === 'number' ? wantIndexVal : 0;
+    const anyWantFulfilled = wantIndex > 0;
+    const want = currentWant(g, charId);
+    const promiseEdge = want !== null ? findEdge(g, 'promise', 'inst:crown', charId) : undefined;
+    const pledged = promiseEdge !== undefined && promiseEdge.props['broken'] !== true && promiseEdge.props['wantKey'] === want;
+    if (!anyWantFulfilled && !pledged) continue; // price unanswered -- neither path holds
+
+    // Controller adjudication (2026-08-27, post-review): declaring requires
+    // an ACTUAL loyalty edge to the ruler -- no default-5000 qualification.
+    // Without this, a departed defector (departureDeltas, arcs.ts, cuts
+    // their loyalty edge on the way out) would read the neutral default
+    // here and, on a high enough legitimacy bonus alone, could "declare"
+    // for the crown from the rival's own court -- a deserter backing the
+    // very claim they just deserted. An absent edge is ineligible, full
+    // stop; only an edge that actually EXISTS gets its bp read (defensively
+    // defaulted to 5000 ONLY if that edge's own `bp` prop is somehow
+    // malformed -- a structurally different, much narrower fallback than
+    // "no edge exists at all").
+    const loyaltyEdge = findEdge(g, 'loyalty', charId, rulerId);
+    if (!loyaltyEdge) continue;
+    const trueLoyalty = typeof loyaltyEdge.props['bp'] === 'number' ? (loyaltyEdge.props['bp'] as number) : 5000;
+    if (effectiveLoyalty(g, charId, trueLoyalty) < DECLARE_LOYALTY) continue;
+
+    const bp = node.props['claimBp'];
+    // Controller adjudication (2026-08-27, second review pass): viaPromise
+    // names a CAUSE, and a named cause must be true (the project's
+    // attribution-honesty precedent -- attribution.ts's becauseOf follows
+    // the same rule for a different mechanism). viaPromise is read
+    // downstream as "the promise is WHY they declared" and Stage 2 (T3)
+    // will collect on it as an obligation, so it may only be stamped when
+    // the promise was the OPERATIVE qualifier: pledged AND the
+    // fulfilled-want path did NOT already qualify them on its own. A
+    // character who genuinely fulfilled their want declares via that path
+    // regardless of any live promise that happens to also name their
+    // current want -- the fulfillment, not the promise, is why they
+    // declared (test/claim.test.ts's "overlap" case pins this; supersedes
+    // the first pass's "stamp whenever a valid promise exists" reading).
+    const viaPromise = pledged && !anyWantFulfilled && promiseEdge ? promiseEdge.id : '';
+    const deltas: GraphDelta[] = [{
+      op: 'edge.add',
+      edge: { id: edgeId('backing', charId, 'inst:crown'), type: 'backing', src: charId, dst: 'inst:crown', props: { declaredAt: tick, bp, viaPromise } },
+    }];
+    g = applyDeltas(g, deltas);
+    em.emit('claim.declared', { data: { charId, bp, viaPromise }, deltas });
   }
   return g;
 }

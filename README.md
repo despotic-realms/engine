@@ -50,6 +50,7 @@ src/
   report.ts            seats + biased ledger projections
   observe.ts           biased observations of executed ops (six precedence rules)
   systems.ts           economy + social steps
+  loyalty.ts           shared effective-loyalty formula + declaration/waverer thresholds
   ladder.ts            tier rules + transitions
   scheduler.ts         policy interface, examiner, famine arc
   arcs.ts              character arcs: restless -> poach bid -> departed/retained
@@ -235,6 +236,79 @@ dramatize, typically by booking a follow-up scene off the very edge the
 loan created. The deed vocabulary grows from sixteen entries to eighteen:
 `borrowed` and `repaid` join the closed set, decaying on the same
 fingerprint clock as the rest.
+
+## The claim (v0.5)
+
+The throne becomes a visible, pursuable goal. A character marked into the
+claim circle declares for the ruler once their price is answered; a run of
+authored flashpoints escalates the campaign under fogged scales and the
+threat of betrayal; momentum sways the undecided; and the campaign's own
+climax can promote or demote the reign through the same tier ladder every
+other transition already uses.
+
+**Declarations** — content marks a character into the circle with two node
+props: `claimCircle: true` and `claimBp` (a per-mille weight — a lord marks
+heavier than a hunter). Each tick, a deterministic, fortune-free pass checks
+every circle character without a standing declaration: if their price is
+answered — their current want already fulfilled, or a binding `pledge`
+naming it — and their loyalty (nudged by momentum and by the crown's own
+standing) clears the declare threshold, they declare. A declaration is a
+`backing` edge to the crown, carrying the weight and, when a pledge was the
+operative reason, which promise earned it. `pledge { charId, wantKey }` is
+direct throne speech (no office in between) that binds the crown to a
+want without paying it — a real obligation, visible in the claim projection
+below, with promise-breaking mechanics left for a later round.
+
+**Flashpoints** — `press_claim { flashpointId }` resolves a contested
+moment: declared backing plus any true asset stones against the rival's
+own opposition, drawn once against a graded table of outcomes from routed
+loss through setback and costly success to outright triumph. A backer
+whose true loyalty is thin and who holds a grudge or a cunning-or-vengeful
+streak counts on the visible scale but not the true one — a false stone,
+invisible until a bad-enough roll unmasks the single largest one and costs
+it its declaration. A triumph despite hidden false stones leaves them
+standing, undiscovered, worse for later. The season's flashpoint table
+(opposition and asset stones, per-band consequences, and which bands
+promote or demote the reign) is content's own data, named in
+`SeasonConfig.flashpoints`.
+
+**Momentum through waverers** — a costly success or triumph sways every
+circle character close to declaring but not there yet; a rout or setback
+sways them and every standing backer the other way. The sway is a
+temporary, decaying nudge to loyalty, never a standalone meter, and never
+stacks with itself — only an authored flashpoint moves it, so pressing
+the same claim repeatedly cannot manufacture momentum out of nothing.
+
+**The claim tier gate** — a `TierRule` (ladder.ts) can name a
+`claimRequire` instead of the ordinary graph-pattern `when`: a minimum
+total of declared backing weight together with a minimum treasury,
+checked instead of any pattern. The season's return rule switches to
+this gate entirely, retiring the older legitimacy-and-treasury thresholds
+it used before the claim existed. A `claimRequire` rule composes with the
+existing `books` mechanism (v0.4.1) exactly like any other transition, so
+a claim-gated return can still guarantee its own arrival scene deals
+first. Underneath, the campaign's own decisive flashpoint bands can also
+promote or demote the reign directly, through the very same tier-checking
+path an ordinary threshold would use — a narrative verdict, not a second
+mechanism alongside it.
+
+**The claim projection** — `claimReport(g, gate)` is the player's entire
+knowledge of the campaign, as data only; every word of prose is content's
+own to write. Each circle character reports as standing declared,
+weighing (near the threshold, undecided), or silent (further off, or
+excluded outright — imprisoned, or with no live tie to the ruler at all)
+— never as a number, and never with any hint of their true loyalty or
+false-stone status, which stay exactly as hidden here as everywhere else
+in this engine. Alongside each character sits their price: the want they
+currently hold, and whether a promise already binds the crown to it. A
+separate list carries every standing obligation — tribute owed under the
+old liege debt, any live loan, any outstanding promise — and the gate
+itself reports what the campaign has against what it still needs, on both
+the backing and the treasury axis. The deed vocabulary that content gates
+reaction scenes on is unchanged at eighteen entries: `pledge` and
+`press_claim` are deliberately excluded from it, since the edges and
+events they write are already the gateable facts, richer than a
+fingerprint stamp would add.
 
 ## What a host adds
 
