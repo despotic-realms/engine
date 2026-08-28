@@ -50,6 +50,7 @@ src/
   report.ts            seats + biased ledger projections
   observe.ts           biased observations of executed ops (six precedence rules)
   systems.ts           economy + social steps
+  loyalty.ts           shared effective-loyalty formula + declaration/waverer thresholds
   ladder.ts            tier rules + transitions
   scheduler.ts         policy interface, examiner, famine arc
   arcs.ts              character arcs: restless -> poach bid -> departed/retained
