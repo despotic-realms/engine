@@ -49,7 +49,15 @@ export interface SeasonConfig {
    *  'char:usurper'). No rival configured means poach bids never fire;
    *  restless arming, stage advance, retention, and departure all still
    *  run regardless -- only the informational arc.poach.bid event and
-   *  arc.departed's `toId` (null instead) are affected. */
+   *  arc.departed's `toId` (null instead) are affected.
+   *
+   *  Since v0.5.1 this field is ALSO the ladder's vacate guard: an
+   *  appointment held by rivalId survives every tier transition
+   *  (ladder.ts, applyTransition). Omitting it on a season whose world
+   *  seats a rival in an office silently reverts to the pre-v0.5.1
+   *  defect -- any transition landing at tier 0 strips the rival's seat
+   *  for good (the idempotency filter blocks re-adds). A season with a
+   *  rival on the board must set this. */
   rivalId?: string;
   /** Claim §3 (2026-08-20 claim plan, Global Constraints): the campaign's
    *  named flashpoints, keyed by flashpointId. Absent means the claim
@@ -550,7 +558,12 @@ export function resolveTick(
     // ReignState.bookings vocabulary, exactly as before TierRule.books
     // existed.
     const tierChangedId = em.nextId();
-    g = applyTransition(g, rule, tick, em);
+    // v0.5.1: rivalId passed through so applyTransition's demote-to-0
+    // vacate branch can exempt the rival's own appointment (ladder.ts's own
+    // comment on that branch has the full defect and fix) -- the same
+    // optional field advanceCharacterArcs already reads a few lines above,
+    // for the same "which character is the external rival" question.
+    g = applyTransition(g, rule, tick, em, season.rivalId);
     tier = rule.to;
     // v0.4.1: a transition's own `books` (ladder.ts) records exactly like a
     // chosen option's (steps 3/4 above, same recordBooking helper -- their

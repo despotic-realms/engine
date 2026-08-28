@@ -165,13 +165,77 @@ export function checkLadder(g: WorldGraph, tier: number, tick: number, rules: re
   return null;
 }
 
-export function applyTransition(g0: WorldGraph, rule: TierRule, tick: number, em: Emitter): WorldGraph {
+// v0.5.1 fix (Critical, reviewer-reproduced): applyTransition's fourth
+// parameter is new. Call sites written before this fix (this file's own
+// callers included) still compile and behave exactly as before -- the
+// param is optional, and omitting it reproduces the pre-fix vacate-
+// everything behavior for whatever rival office may exist (see the
+// DOCUMENTED LIMIT below). tick.ts's resolveTick passes `season.rivalId`
+// here, the same optional SeasonConfig field advanceCharacterArcs already
+// reads for poach-bidding (arcs.ts) -- so a season that wants this
+// protection sets the field once and both consumers honor it.
+export function applyTransition(g0: WorldGraph, rule: TierRule, tick: number, em: Emitter, rivalId?: string): WorldGraph {
   const deltas: GraphDelta[] = [];
-  // Falling to Tier 0 is exile: every office the crown held comes vacant
-  // (a change of playing field, not a game-over screen), and the crown
-  // itself is marked so downstream systems know it has no seat.
-  if (rule.kind === 'demote' && rule.to === 0) {
-    for (const e of edgesOfType(g0, 'appointment')) deltas.push({ op: 'edge.remove', id: e.id });
+  // Falling to Tier 0 is exile: every office the FALLING RULER'S OWN court
+  // held comes vacant (a change of playing field, not a game-over screen),
+  // and the crown itself is marked so downstream systems know it has no
+  // seat.
+  //
+  // This used to fire on `rule.kind === 'demote' && rule.to === 0` alone,
+  // with two consequences neither intended (both proven live, not just
+  // theoretical -- see test/ladder.test.ts's "exile vacate is scoped, not
+  // blanket" suite):
+  //  (a) a SELF-transition (rule.from === rule.to === 0 -- content's real
+  //      shape for a routed march, reached only via a decisive
+  //      flashpoint's `demoteOnRoutTo: 0`) still matched, even though the
+  //      crown's tier never changes on a self-transition -- nothing was
+  //      actually "falling." A failed attempt to unseat a rival stripped
+  //      the RIVAL'S OWN office anyway, and content's own opposition
+  //      weight for the next attempt reads that same edge's existence, so
+  //      the worst outcome (rout) made the rival look weaker on the retry
+  //      instead of unchanged.
+  //  (b) even on a genuine fall, the loop removed EVERY appointment edge
+  //      in the graph indiscriminately -- including a rival's own
+  //      appointment to their own office, never granted by the falling
+  //      ruler and never the falling ruler's to lose. Once removed,
+  //      content cannot repair it after the fact: the effects loop just
+  //      below drops any edge.add whose id already exists in g0 -- exactly
+  //      the id this branch just orphaned -- so a content-authored graft
+  //      meant to re-seat the rival is silently dropped, not applied,
+  //      regardless of ordering. This half was live from the first tick
+  //      any real season let a rival's appointment survive into a live
+  //      graph (a genesis fact, or carried across an earlier promotion --
+  //      no promote rule ever touches an appointment edge, so once seated,
+  //      a rival's office persists until a demote-to-0 branch like this
+  //      one sweeps it up) -- it was never a self-transition-only bug.
+  //
+  // Fixed by two independent narrowings, both required:
+  //  - `rule.from !== rule.to` scopes the whole branch to an ACTUAL change
+  //    of tier -- "falling" to Tier 0 from somewhere else, never a
+  //    self-transition. Fixes (a).
+  //  - the loop below now skips any appointment edge whose HOLDER is
+  //    `rivalId`. This is the smallest discriminator the graph actually
+  //    offers: an appointment edge carries no record of WHO or WHAT
+  //    granted it (only `since`), so "is this the falling ruler's own
+  //    court" cannot be read off the edge directly -- but "is this
+  //    character the season's designated rival" is already a first-class,
+  //    if optional, fact SeasonConfig carries for exactly this kind of
+  //    external-actor scoping. Fixes (b).
+  //
+  // DOCUMENTED LIMIT: this protects exactly one named character. A season
+  // that never sets `rivalId` gets the pre-fix behavior for whatever
+  // office an unnamed rival might hold -- setting the field is content's
+  // own follow-up, not this engine's, and a cast with several independent
+  // external power-holders would need a different mechanism than a single
+  // id. This is the smallest rule that satisfies every constraint the real
+  // content shapes need today, not a general "whose office is this"
+  // answer -- the graph has no such general answer to give, since an
+  // appointment edge never records its own appointing context.
+  if (rule.kind === 'demote' && rule.to === 0 && rule.from !== rule.to) {
+    for (const e of edgesOfType(g0, 'appointment')) {
+      if (rivalId !== undefined && e.src === rivalId) continue; // never the falling ruler's to lose
+      deltas.push({ op: 'edge.remove', id: e.id });
+    }
     deltas.push({ op: 'node.set', id: 'inst:crown', key: 'inExile', value: true });
   }
   // Content-authored graft (see the design note above): swap the next
