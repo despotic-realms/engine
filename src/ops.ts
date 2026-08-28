@@ -392,32 +392,36 @@ function isStanceId(v: unknown): v is string {
 // existence only at validateDecisions, which never sees option-bound ops at
 // all -- see that report for why this was rejected).
 //
-// tierRules/tier/tick (v0.5.2, severe exploit fix -- S-farm Finding 1):
-// threaded the identical way flashpoints was in T3 -- optional trailing
-// parameters, each defaulting to an inert value ([] / -1 / 0), so every
-// call site above (mediate.ts, storylet.ts's checkDeck, ops.ts's own onBand
-// loop, and the whole existing test suite) keeps compiling and passing
-// completely unchanged; only tick.ts's two REAL press_claim choke points
-// (validateDecisions's raw-ops loop, resolveTick's attended and
-// default-option loops) pass the season's real tierRules and the reign's
-// real (tier, tick). Needed for gate A (below): a decisive press must be
-// checked against the SAME (from: tier, kind: 'promote', to: promoteTo)
-// rule checkLadder itself would later match (ladder.ts) -- tier and
-// tierRules find that rule; tick is needed separately, by gate B, to read
-// "how long ago" against the graph-stored last-pressed fact. Defaulting
-// tier to -1 (never a real tier -- tiers are non-negative) rather than 0
-// means an un-threaded caller can never accidentally match a real rule at
-// tier 0; defaulting tierRules to [] means no rule can ever match at all --
-// both defaults therefore FAIL CLOSED for gate A (a decisive press with no
-// real ladder context rejects, it is never silently waved through), while
-// costing every non-press_claim op and every non-decisive press nothing,
-// since neither reads these parameters at all.
+// tick (v0.5.2, severe exploit fix -- S-farm Finding 1): threaded the
+// identical way flashpoints was in T3 -- one optional trailing parameter,
+// defaulting to 0, so every call site above (mediate.ts, storylet.ts's
+// checkDeck, ops.ts's own onBand loop, and the whole existing test suite)
+// keeps compiling and passing completely unchanged; only tick.ts's real
+// press_claim choke points (validateDecisions's raw-ops loop, resolveTick's
+// attended and default-option loops) pass the reign's real tick. Needed by
+// gate B (below) alone, to read "how long ago" against the graph-stored
+// last-pressed fact.
+//
+// v0.5.2 review fix (2026-08-28, controller-adjudicated, Critical): this
+// function ALSO carried a "gate A" here through the first review round --
+// rejecting a press outright, pre-roll, whenever its flashpoint carried a
+// claim promotion for the current tier not yet backed enough. Retired
+// entirely: the real, shipped `t0.return.the-march` flashpoint
+// (content/src/worlds/tier0.ts) is authored with a DATED design comment
+// (content/src/decks/tier0.ts:1436-1444) stating a player may "call the
+// march early, underprepared, and take the field with whatever they have"
+// -- its own eligibility pattern deliberately never checks backing, only
+// treasury -- and that flashpoint's rout band is `task-10-report.md`'s own
+// S-rout scenario's ONLY route to the routed self-transition below the
+// 700bp threshold. A press_claim now validates on cooldown alone (gate B);
+// the claim-requirement check moved to applyOp's decisive-stamp step
+// instead, where it can suppress the UNDESERVED CONSEQUENCE (an
+// unqualified promotion) without blocking the roll itself -- see applyOp's
+// 'press_claim' case, below, for the relocated mechanism.
 export function validateOp(
   g: WorldGraph,
   raw: unknown,
   flashpoints: Record<string, FlashpointDef> = {},
-  tierRules: readonly TierRule[] = [],
-  tier: number = -1,
   tick: number = 0,
 ): OpResult {
   if (typeof raw !== 'object' || raw === null) return { ok: false, error: 'op must be an object' };
@@ -594,51 +598,27 @@ export function validateOp(
     // on the STORYLET offering it, and a raw directive bypasses a
     // storylet's dealing gate entirely (an established fact/technique in
     // this codebase; T10's own report cites claim-campaign.test.ts and
-    // play-smoke.test.ts for it). validateOp is the one choke point every
-    // press_claim op must clear before applyOp ever runs, whether it
-    // arrived bound to a chosen storylet option or as a raw directive
+    // play-smoke.test.ts for it). Gate B (the press cooldown) lives here:
+    // validateOp is the one choke point every press_claim clears before
+    // applyOp ever runs, whether option-bound or a raw directive
     // (resolveTick's steps 3/4 and validateDecisions' own wire-gate check
-    // all call validateOp first) -- so gating HERE closes both paths at
-    // once. Two independent mechanisms, checked in this fixed order: gate B
-    // (cooldown) first, since it is the simpler, universally-applicable
-    // check and needs no ladder context at all; gate A (the decisive gate)
-    // second, since it only ever applies to a press that could promote the
-    // reign. A press failing both reports gate B's reason -- the two are
-    // independent checks, never combined into one message.
+    // all call validateOp first). cooldownTicks absent or 0 means no
+    // cooldown at all (full back-compat -- see FlashpointDef's own doc
+    // comment). last-pressed state is read off the GRAPH (lastPressedAt,
+    // below), never ReignState, so a replay from the chronicle alone
+    // reproduces the exact same accept/reject decision a live tick made.
+    //
+    // The claim-requirement check ("gate A" through the first review round)
+    // does NOT live here -- see validateOp's own header comment for why it
+    // was retired from this function and relocated to applyOp's
+    // decisive-stamp step instead.
     case 'press_claim': {
       const flashpointId = op['flashpointId'] as string;
       const def = flashpoints[flashpointId]!; // existence already confirmed by the param-shape loop above
-
-      // Gate B: the press cooldown. cooldownTicks absent or 0 means no
-      // cooldown at all (full back-compat -- see FlashpointDef's own doc
-      // comment). last-pressed state is read off the GRAPH (lastPressedAt,
-      // below), never ReignState, so a replay from the chronicle alone
-      // reproduces the exact same accept/reject decision a live tick made.
       if (def.cooldownTicks !== undefined && def.cooldownTicks > 0) {
         const last = lastPressedAt(g, flashpointId);
         if (last !== undefined && tick - last < def.cooldownTicks)
           return { ok: false, error: `flashpoint '${flashpointId}' was pressed too recently and is still cooling down` };
-      }
-
-      // Gate A: the decisive gate. A press whose consequences include a
-      // claim PROMOTION for the CURRENT tier must clear the exact same
-      // claimRequire threshold checkLadder's own decisive branch
-      // (ladder.ts) would otherwise let it skip entirely -- that branch
-      // matches a decisive claimPromoteTo against the season's (from, kind,
-      // to) rule directly and never re-consults that rule's own
-      // claimRequire. Matched the identical way here: (from: tier, kind:
-      // 'promote', to: promoteTo). A non-decisive press (this flashpoint
-      // carries no promoteTo at all) is never touched by this gate -- see
-      // the switch comment above. Fails closed: no matching rule, or a
-      // matching rule with no claimRequire at all (an ordinary
-      // `when`-gated promotion has no press-time threshold for this gate to
-      // check -- the press is not how that rule fires), rejects rather than
-      // assumes the press is fine.
-      const promoteTo = def.decisive?.promoteTo;
-      if (promoteTo !== undefined) {
-        const rule = tierRules.find((r) => r.from === tier && r.kind === 'promote' && r.to === promoteTo);
-        if (!rule?.claimRequire || declaredBackingBp(g) < rule.claimRequire.backingBp || treasury(g) < rule.claimRequire.treasury)
-          return { ok: false, error: `flashpoint '${flashpointId}' cannot decide the throne yet -- the claim is not backed enough` };
       }
       break;
     }
@@ -924,9 +904,36 @@ function lastPressedAt(g: WorldGraph, flashpointId: string): number | undefined 
 // function with `fortune` still undefined is a wiring bug upstream (that
 // chain always has a live Fortune by construction) and throws rather than
 // silently no-op'ing -- see the 'press_claim' case below.
+//
+// tierRules/tier (v0.5.2 review fix, 2026-08-28, controller-adjudicated,
+// Critical): the claim-requirement check relocated here from validateOp
+// (see that function's own header for the full "why" -- in short, gate A's
+// old pre-roll rejection there broke the real, shipped `'the-march'`
+// flashpoint's own authored "call it early, underprepared" design and
+// foreclosed S-rout's only route to a routed self-transition below 700bp).
+// Threaded the same way flashpoints/fortune were: optional trailing
+// parameters defaulting to inert values ([] / -1), so every existing direct
+// applyOp call across this suite's tests -- including EVERY
+// flashpoint.test.ts decisive-outcome test, none of which construct a real
+// SeasonConfig -- keeps stamping claimPromoteTo exactly as it always did:
+// with an empty tierRules array, `.find` can never locate a rule, so the
+// new claimRequire check below can never find positive evidence the
+// requirement is UNMET, and therefore never suppresses. This is a
+// deliberate reversal of gate A's old fail-CLOSED polarity (reject when no
+// ladder context is threaded) to a fail-OPEN one (stamp when no ladder
+// context is threaded) -- correct here because failing closed at this
+// APPLY-time stamp step would silently break dozens of pre-existing direct
+// applyOp tests that were never wrong to begin with, whereas the real
+// exploit path (resolveTick) always threads season.tierRules/state.tier for
+// real, so the production gate stays exactly as strong. Only the two real
+// call chains -- tick.ts's applyOpWithWants (itself threaded from
+// resolveTick's own season.tierRules/state.tier) and this same function's
+// own onBand loop (recursing with the tierRules/tier it already holds) --
+// ever pass real values.
 export function applyOp(
   g: WorldGraph, op: Op, tick: number, em: Emitter, seatId: string, parents: string[] = [],
   flashpoints: Record<string, FlashpointDef> = {}, fortune?: Fortune,
+  tierRules: readonly TierRule[] = [], tier: number = -1,
 ): WorldGraph {
   switch (op.kind) {
     case 'decree_tax': {
@@ -1355,9 +1362,42 @@ export function applyOp(
       // would apply strictly afterward and win any conflict (documented,
       // not tested: no op in the current vocabulary touches either prop).
       // Setback reads neither field, on any FlashpointDef.
+      //
+      // v0.5.2 review fix (2026-08-28, controller-adjudicated, Critical):
+      // the claimPromoteTo stamp on a triumph/costly band is now
+      // CONDITIONAL. The roll always happens (backing readiness is exactly
+      // what press_claim itself measures, per the real content's own dated
+      // design comment, content/src/decks/tier0.ts:1436-1444) and every
+      // OTHER consequence of the band applies exactly as authored --
+      // onBand ops below, momentum nudges further down, and (unconditional,
+      // untouched) the demote stamp on a rout. Only the PROMOTION itself is
+      // withheld, and only when a matching season tier rule exists, carries
+      // its own claimRequire, and that requirement is not met -- the same
+      // (from: tier, kind: 'promote', to: promoteTo) lookup checkLadder's
+      // own decisive branch (ladder.ts) uses, and the same declaredBackingBp
+      // sum/treasury threshold checkLadder's ordinary claimRequire path and
+      // report.ts's claim projection already use (imported, not
+      // re-derived). No matching rule, or a matching rule with no
+      // claimRequire at all (an ordinary `when`-gated promotion has no
+      // press-time threshold to check here), is NOT evidence of a shortfall
+      // -- the stamp still lands, unsuppressed, exactly as it always did
+      // (see applyOp's own header comment for why this direction fails
+      // OPEN, not closed, unlike the retired validateOp gate). A withheld
+      // promotion is not silent: claim.flashpoint's own data carries
+      // `promotionWithheld: true` (present only then) so content can voice
+      // the hollow victory -- the gate and the claim's own backing are
+      // already player-visible via claimReport, so the event needs to say
+      // only THAT it happened, not recompute why.
       const decisiveDeltas: GraphDelta[] = [];
-      if ((band === 'triumph' || band === 'costly') && def.decisive?.promoteTo !== undefined) {
-        decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: 'claimPromoteTo', value: def.decisive.promoteTo });
+      let promotionWithheld = false;
+      const promoteTo = def.decisive?.promoteTo;
+      if ((band === 'triumph' || band === 'costly') && promoteTo !== undefined) {
+        const rule = tierRules.find((r) => r.from === tier && r.kind === 'promote' && r.to === promoteTo);
+        if (rule?.claimRequire && (declaredBackingBp(g) < rule.claimRequire.backingBp || treasury(g) < rule.claimRequire.treasury)) {
+          promotionWithheld = true;
+        } else {
+          decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: 'claimPromoteTo', value: promoteTo });
+        }
       }
       if (band === 'rout' && def.decisive?.demoteOnRoutTo !== undefined) {
         decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: 'claimDemoteTo', value: def.decisive.demoteOnRoutTo });
@@ -1376,7 +1416,7 @@ export function applyOp(
       let g2 = applyDeltas(g, decisiveDeltas);
       const flashpointEvent = em.emit('claim.flashpoint', {
         parents,
-        data: { flashpointId: op.flashpointId, band, visibleScale, trueScale, opposition },
+        data: { flashpointId: op.flashpointId, band, visibleScale, trueScale, opposition, ...(promotionWithheld ? { promotionWithheld: true } : {}) },
         deltas: decisiveDeltas,
       });
 
@@ -1386,13 +1426,20 @@ export function applyOp(
       // want-advancing applyOpWithWants, which this file cannot import
       // without a cycle) -- an onBand op's own deltas land, but it does not
       // itself trigger want advancement; see this file's task-3 report.
+      // tierRules/tier forwarded unchanged (this function already holds
+      // them as its own parameters) so a hypothetical nested press_claim
+      // inside an onBand array would see the SAME real ladder context this
+      // outer press did, rather than silently falling back to the
+      // never-suppress defaults -- no current content or test authors this
+      // shape, but it costs nothing to keep correct since the values are
+      // already in scope.
       for (const bandOp of def.onBand[band]) {
         const check = validateOp(g2, bandOp, flashpoints);
         if (!check.ok) {
           em.emit('op.rejected', { parents: [flashpointEvent.id], data: { opKind: bandOp.kind, op: bandOp, error: check.error, via: 'onBand' } });
           continue;
         }
-        g2 = applyOp(g2, check.op, tick, em, seatId, [flashpointEvent.id], flashpoints, fortune);
+        g2 = applyOp(g2, check.op, tick, em, seatId, [flashpointEvent.id], flashpoints, fortune, tierRules, tier);
       }
 
       // Betrayal (rout/setback only, and only when a false stone exists):
