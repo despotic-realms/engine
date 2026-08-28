@@ -44,16 +44,21 @@ function crownGraph(crownExtra: Record<string, boolean> = {}): WorldGraph {
  *  false-stone check reads -- a loyalty edge (omitted entirely to exercise
  *  the no-edge-reads-as-0 seam), a grudge edge, and/or cunning/vengeful
  *  traits. Hand-built throughout (like claim.test.ts's own backing
- *  fixtures) -- declarationStep (Task 1) is not under test here. */
+ *  fixtures) -- declarationStep (Task 1) is not under test here.
+ *  `imprisoned` (review fix, momentum asymmetry pin): mirrors withCircle's
+ *  own option -- a declared backer can be imprisoned AFTER declaring
+ *  (imprisonment never retracts a standing declaration), unlike a waverer
+ *  who is excluded from momentum entirely while imprisoned. */
 function withBacker(
   g: WorldGraph,
   charId: string,
   bp: number,
-  opts: { loyalty?: number; grudge?: boolean; cunning?: boolean; vengeful?: boolean } = {},
+  opts: { loyalty?: number; grudge?: boolean; cunning?: boolean; vengeful?: boolean; imprisoned?: boolean } = {},
 ): WorldGraph {
   const props: Record<string, boolean | string> = { name: charId };
   if (opts.cunning) props['trait:cunning'] = true;
   if (opts.vengeful) props['trait:vengeful'] = true;
+  if (opts.imprisoned) props['imprisoned'] = true;
   g = addNode(g, { id: charId, type: 'character', props });
   g = addEdge(g, { type: 'backing', src: charId, dst: 'inst:crown', props: { declaredAt: 0, bp, viaPromise: '' } });
   if (opts.loyalty !== undefined) g = addEdge(g, { type: 'loyalty', src: charId, dst: 'char:ruler', props: { bp: opts.loyalty } });
@@ -768,6 +773,20 @@ describe('press_claim: momentum (a) triumph/costly nudges exactly the waverer ba
     expect(getNode(g2, 'char:atceiling').props['claimNudge']).toBe(800);
     expect(getNode(g2, 'char:overceiling').props['claimNudge']).toBeUndefined();
   });
+
+  // Review fix, minor (2026-08-28): every other test in this block exercises
+  // triumph only -- the +800 leg is `band === 'triumph' || band === 'costly'`
+  // in production, so costly needs its own resolution pinned too, not just
+  // inferred from the shared code path. ELSE_COSTLY exists already (T3).
+  it('costly resolves through the SAME +800 leg as triumph (not triumph-only)', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withCircle(g, 'char:waverer', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2, flashpointEvent } = pressClaim(g, def, ELSE_COSTLY);
+    expect((flashpointEvent.data as { band: string }).band).toBe('costly');
+    expect(getNode(g2, 'char:waverer').props['claimNudge']).toBe(800);
+    expect(getNode(g2, 'char:waverer').props['claimNudgeAt']).toBe(ELSE_COSTLY.tick);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -820,6 +839,34 @@ describe('press_claim: momentum (b) rout/setback nudges declared backers AND wav
 
     expect(getNode(g2, 'char:traitor').props['claimNudge']).toBeUndefined(); // NOT also nudged
     expect(em.all().find((e) => e.type === 'claim.swayed')).toBeUndefined(); // no-op guard: nobody qualifies
+  });
+
+  // Review fix, minor (2026-08-28): the test above proves the traitor is
+  // excluded, but with nobody ELSE present to nudge, it can't distinguish a
+  // SELECTIVE exclusion (only the unmasked traitor skipped) from a BLANKET
+  // one (rout with any betrayal just skips momentum entirely). This one mixes
+  // in a real backer and a waverer alongside the traitor to prove it's
+  // selective: the -400 lands on the other two, and claim.swayed DOES fire.
+  it('a false stone unmasked in the SAME resolution as other real backers/waverers: the -400 lands on the OTHERS -- selective exclusion of the unmasked traitor alone, not a blanket "skip momentum" outcome', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withBacker(g, 'char:traitor', 2000, { loyalty: 1000, cunning: true }); // false stone -- unmasked on rout
+    g = withBacker(g, 'char:loyalbacker', 500, { loyalty: 6000 }); // real, loyal -- never a false stone
+    g = withCircle(g, 'char:waverer', { loyalty: 4500 });
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2, em, flashpointEvent } = pressClaim(g, def, ELSE_ROUT);
+    expect((flashpointEvent.data as { band: string }).band).toBe('rout');
+    expect(em.all().find((e) => e.type === 'claim.betrayed')?.data).toEqual({ charId: 'char:traitor' });
+
+    // The traitor: unmasked, and NOT also nudged.
+    expect(findEdge(g2, 'backing', 'char:traitor', 'inst:crown')).toBeUndefined();
+    expect(getNode(g2, 'char:traitor').props['claimNudge']).toBeUndefined();
+
+    // The others: -400 lands, exactly as it would with no betrayal at all.
+    expect(getNode(g2, 'char:loyalbacker').props['claimNudge']).toBe(-400);
+    expect(getNode(g2, 'char:waverer').props['claimNudge']).toBe(-400);
+
+    const swayedEv = em.all().find((e) => e.type === 'claim.swayed');
+    expect(swayedEv?.data).toEqual({ charIds: ['char:loyalbacker', 'char:waverer'], direction: 'away' });
   });
 });
 
@@ -1060,6 +1107,20 @@ describe('press_claim: momentum exclusions (imprisoned / no loyalty edge) -- mir
     const def: FlashpointDef = { assets: [], opposition: [], onBand: EMPTY_ON_BAND };
     const { g2 } = pressClaim(g, def, R1500_TRIUMPH);
     expect(getNode(g2, 'char:noedge').props['claimNudge']).toBeUndefined();
+  });
+
+  // Review fix (2026-08-28): CONTRAST to the two imprisoned-waverer cases
+  // above. Behavior already correct pre-fix (upheld by review) -- this pins
+  // it, honestly GREEN from the start, no RED staged first. Mirrors
+  // withCircle's own `imprisoned` option, now added to withBacker too.
+  it('CONTRAST: a declared backer imprisoned AFTER declaring still receives claimNudge=-400 on rout/setback -- imprisonment does not retract a standing declaration, unlike the waverer exclusion above', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    g = withBacker(g, 'char:jailedbacker', 2000, { loyalty: 6000, imprisoned: true }); // declared, loyal (never a false stone), AND imprisoned
+    const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), onBand: EMPTY_ON_BAND };
+    const { g2, flashpointEvent } = pressClaim(g, def, ELSE_ROUT);
+    expect((flashpointEvent.data as { band: string }).band).toBe('rout');
+    expect(getNode(g2, 'char:jailedbacker').props['claimNudge']).toBe(-400);
+    expect(getNode(g2, 'char:jailedbacker').props['claimNudgeAt']).toBe(ELSE_ROUT.tick);
   });
 });
 
