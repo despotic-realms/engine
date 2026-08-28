@@ -7,7 +7,20 @@ import type { Fx } from './fx.js';
 export type NodeId = string;
 export type EdgeId = string;
 export type NodeType = 'character' | 'faction' | 'place' | 'office' | 'institution' | 'project';
-export type EdgeType = 'grudge' | 'loyalty' | 'kinship' | 'debt' | 'appointment' | 'route' | 'interest';
+// Claim §1-2 (2026-08-20 claim plan, Global Constraints -- verbatim-binding
+// shapes): 'backing' (src char -> dst inst:crown, props { declaredAt,
+// bp, viaPromise } -- systems.ts's declarationStep is the only writer,
+// arc departure and betrayal unmasking the only removers) and 'promise'
+// (src inst:crown -> dst char, props { wantKey, madeAt, dueOn, broken } --
+// Task 2's `pledge` op is the only writer). 'promise' lands here in Task 1,
+// ahead of Task 2's own op, because the declaration pass's price-answered
+// check (systems.ts) must compare an edge's `type` against the literal
+// 'promise' -- a comparison TypeScript rejects at compile time unless the
+// literal is a member of this closed union, so the check and the union
+// member can't be split across tasks the way the plan's own task list
+// assumed. Task 2 still owns creating real promise edges (the `pledge` op);
+// this file just has to admit the shape one task early.
+export type EdgeType = 'grudge' | 'loyalty' | 'kinship' | 'debt' | 'appointment' | 'route' | 'interest' | 'backing' | 'promise';
 export type PropValue = bigint | number | string | boolean | PropValue[] | { [key: string]: PropValue };
 export type Props = Record<string, PropValue>;
 

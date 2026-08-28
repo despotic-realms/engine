@@ -30,7 +30,7 @@ import type { Band, WantKey } from './spine.js';
 import { WANT_FULFILL, currentWant } from './spine.js';
 import type { Deck, Storylet, StoryletOption } from './storylet.js';
 import { bindOps, eligibleStorylets, possibleStorylets, renderTpl } from './storylet.js';
-import { debtOverdueStep, economyStep, fingerprintDecayStep, socialStep } from './systems.js';
+import { debtOverdueStep, declarationStep, economyStep, fingerprintDecayStep, socialStep } from './systems.js';
 
 export interface TierConfig { deckIds: string[]; briefBudget: number; attentionSlots: number; mediation?: MediationConfig }
 
@@ -471,6 +471,15 @@ export function resolveTick(
   // 5-7. Systems.
   g = economyStep(g, tick, fortune, em);
   g = socialStep(g, tick, em);
+  // Claim §1-2 (2026-08-20 claim plan): the declaration pass, immediately
+  // after socialStep per the plan's own instruction -- and load-bearing
+  // here specifically, not just a convenient adjacency: it must run BEFORE
+  // advanceCharacterArcs below (character-arc departure cuts a defector's
+  // loyalty edge, which would otherwise read back as the neutral 5000
+  // default and could freshly declare a character the same tick they
+  // defect). See systems.ts's declarationStep header for the full
+  // placement rationale.
+  g = declarationStep(g, tick, em);
   // Causality §2: deed fingerprint decay, adjacent to socialStep (systems.ts)
   // -- placed here for the same "no dependency either way" reason advanceArcs
   // and character arcs sit next to each other below: fingerprint props are
