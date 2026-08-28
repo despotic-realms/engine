@@ -7,6 +7,7 @@ export * from './events.js';
 export * from './constants.js';
 export * from './spine.js';
 export * from './bands.js';
+export * from './loyalty.js';
 export * from './ops.js';
 export * from './mediate.js';
 export * from './match.js';

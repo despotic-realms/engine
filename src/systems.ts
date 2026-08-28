@@ -18,6 +18,12 @@ import { clampFx, divFx, fx, fxFromInt, fxToString, fxWhole, mulFx, FX_ONE, FX_Z
 import type { Fortune } from './fortune.js';
 import type { WorldGraph } from './graph.js';
 import { appendAllegianceLog, edgeId, edgesFrom, edgesOfType, edgesTo, findEdge, foldAllegianceDrift, getNode, nodeIds, nodesOfType, propFx, propInt, propStr, setEdgeProp, setNodeProp } from './graph.js';
+// Claim §1-3/momentum: the shared effective-loyalty formula and its declare
+// threshold, relocated to this leaf module (2026-08-28, review fix) so this
+// file and ops.ts (press_claim's own isWaverer, same formula/threshold)
+// share one dependency instead of importing from each other -- see
+// loyalty.ts's own header.
+import { DECLARE_LOYALTY, effectiveLoyalty } from './loyalty.js';
 import { DEED_NAMES, FINGERPRINT_TICKS } from './ops.js';
 import { currentWant } from './spine.js';
 
@@ -523,42 +529,16 @@ export function debtOverdueStep(g0: WorldGraph, tick: number, em: Emitter): Worl
 // very next tick's pass simply sees the flag cleared. Both pinned in
 // test/claim.test.ts's "exclusions" suite: the departed-re-declare repro,
 // and an imprisoned-then-pardoned character declaring only after the pardon.
-// Controller adjudication (2026-08-27, post-review): takes the character's
-// TRUE loyalty bp as an already-resolved number rather than re-deriving it
-// from a (charId, rulerId) pair internally, so the loyalty-EDGE-EXISTENCE
-// decision lives exactly once, at declarationStep's own call site below --
-// this function is never the place a "no edge" case could quietly default
-// to neutral again.
-// Exported (2026-08-27, Task 4/momentum): ops.ts's press_claim resolution
-// needs this SAME formula to decide who is a "waverer" (Global Constraints:
-// effective loyalty in [WAVERER_FLOOR, DECLARE_LOYALTY)) -- reused verbatim
-// here rather than re-derived a second place, per the task brief's own
-// instruction, so the waverer band and the declare threshold can never
-// drift apart. Creates a real, function-declaration-only import cycle with
-// ops.ts (which already exports DEED_NAMES/FINGERPRINT_TICKS back to this
-// file) -- safe under Node's ESM live bindings because BOTH sides only ever
-// read the other module's binding from inside a function body (never at
-// either module's own top level), so neither module needs the other to have
-// finished initializing before it can finish its own; see this task's
-// report for the fuller reasoning.
-export function effectiveLoyalty(g: WorldGraph, charId: string, trueLoyaltyBp: number): number {
-  // claimNudge: a char prop written by momentum (Task 4); absent (this
-  // task, and any character Task 4 has never touched) reads as 0 -- the
-  // same "absent means the neutral default" idiom aptOf/loyaltyBp/wealthOf
-  // each already use for their own props.
-  const nudgeVal = getNode(g, charId).props['claimNudge'];
-  const claimNudge = typeof nudgeVal === 'number' ? nudgeVal : 0;
-  const legitimacy = propFx(getNode(g, 'inst:crown').props, 'legitimacy');
-  const legitimacyWholePoints = Number(fxWhole(legitimacy));
-  return trueLoyaltyBp + claimNudge + legitimacyWholePoints * 20;
-}
-
-/** The effective-loyalty threshold a circle character's score must clear
- *  (inclusive) to declare (Global Constraints). Exported so Task 4's
- *  waverer band ([4000, DECLARE_LOYALTY)) can cite this same value instead
- *  of re-deriving the magic number 5500 a second place. */
-export const DECLARE_LOYALTY = 5500;
-
+// effectiveLoyalty (the formula) and DECLARE_LOYALTY (its declare threshold)
+// used to live here, defined right above this point -- relocated to
+// loyalty.ts (2026-08-28, review fix on Task 4/momentum) so this file and
+// ops.ts share one leaf dependency instead of importing from each other;
+// see loyalty.ts's own header for the full reasoning (bands.ts is the
+// precedent) and the imports at the top of this file. Pure relocation: the
+// formula, the "takes an already-resolved trueLoyaltyBp so the loyalty-
+// edge-existence decision lives exactly once, at each caller's own site"
+// contract, and the 5500 threshold are all byte-identical to what shipped
+// in the original Task 4 commit, just no longer defined in this file.
 export function declarationStep(g0: WorldGraph, tick: number, em: Emitter): WorldGraph {
   let g = g0;
   const rulerId = propStr(getNode(g, 'inst:crown').props, 'rulerCharId');

@@ -37,13 +37,14 @@ import { evalPredicate } from './match.js';
 import { currentWant, hasTrait, WANT_KEYS } from './spine.js';
 import type { WantKey } from './spine.js';
 // Claim §3/momentum (2026-08-20 claim plan, Global Constraints): press_claim's
-// own nudge application (below) needs the SAME effective-loyalty formula and
-// the SAME DECLARE_LOYALTY threshold declarationStep (systems.ts) already
-// uses, reused verbatim rather than re-derived a second place -- see
-// systems.ts's own export comment on effectiveLoyalty for why the resulting
-// import cycle (systems.ts already imports DEED_NAMES/FINGERPRINT_TICKS from
-// THIS file) is safe.
-import { DECLARE_LOYALTY, effectiveLoyalty } from './systems.js';
+// own nudge application (below, isWaverer) needs the SAME effective-loyalty
+// formula and the SAME DECLARE_LOYALTY threshold declarationStep (systems.ts)
+// already uses -- both, plus the paired WAVERER_FLOOR constant, live in this
+// leaf module (2026-08-28, review fix) so this file and systems.ts share one
+// dependency instead of importing from each other; see loyalty.ts's own
+// header for why (bands.ts, imported the same one-directional way by
+// mediate.ts/observe.ts, is the precedent this follows).
+import { DECLARE_LOYALTY, effectiveLoyalty, WAVERER_FLOOR } from './loyalty.js';
 
 export type Op =
   | { kind: 'decree_tax'; placeId: string; rateBp: number }
@@ -683,13 +684,6 @@ function isFalseStone(g: WorldGraph, charId: string, rulerId: string): boolean {
   return findEdge(g, 'grudge', charId, rulerId) !== undefined || hasTrait(g, charId, 'cunning') || hasTrait(g, charId, 'vengeful');
 }
 
-// Momentum (claim §3, Global Constraints): the effective-loyalty floor a
-// circle character's score must clear to become sway-eligible ("waverer")
-// -- paired with DECLARE_LOYALTY (systems.ts) as the OTHER end of the same
-// half-open band [WAVERER_FLOOR, DECLARE_LOYALTY). Exported so tests can
-// cite it by name, mirroring TREACHERY_BP/DECLARE_LOYALTY's own precedent.
-export const WAVERER_FLOOR = 4000;
-
 // A "waverer" (claim §3, Global Constraints): a claim-circle character (the
 // SAME claimCircle===true AND claimBp:number AND declarationStep itself
 // uses) with no backing edge yet, not imprisoned (a cell is not a court --
@@ -698,9 +692,9 @@ export const WAVERER_FLOOR = 4000;
 // unguarded), holding a REAL loyalty edge to the ruler (mirrors
 // declarationStep's other exclusion -- no edge, no default-to-neutral
 // qualification, the same false-stone-from-a-rival-court hole T1 closed for
-// declaring itself), whose EFFECTIVE loyalty (systems.ts's own exported
+// declaring itself), whose EFFECTIVE loyalty (loyalty.ts's own exported
 // helper, reused verbatim rather than re-derived) sits in [WAVERER_FLOOR,
-// DECLARE_LOYALTY).
+// DECLARE_LOYALTY) -- both imported from loyalty.ts, not defined here.
 //
 // Declared backers (a live `backing` edge) are handled separately at each
 // press_claim call site below, not folded into this predicate: the two

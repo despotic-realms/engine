@@ -18,9 +18,10 @@ import { fx } from '../src/fx.js';
 import { makeFortune } from '../src/fortune.js';
 import { addEdge, addNode, emptyGraph, findEdge, getNode, propFx } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
-import { applyOp, DEEDS, OP_KINDS, TREACHERY_BP, WAVERER_FLOOR, validateOp } from '../src/ops.js';
+import { DECLARE_LOYALTY, WAVERER_FLOOR } from '../src/loyalty.js';
+import { applyOp, DEEDS, OP_KINDS, TREACHERY_BP, validateOp } from '../src/ops.js';
 import type { FlashpointDef, Op, Term } from '../src/ops.js';
-import { CLAIM_NUDGE_TICKS, claimNudgeDecayStep, DECLARE_LOYALTY, declarationStep } from '../src/systems.js';
+import { CLAIM_NUDGE_TICKS, claimNudgeDecayStep, declarationStep } from '../src/systems.js';
 import { initialState, resolveTick } from '../src/tick.js';
 import type { SeasonConfig } from '../src/tick.js';
 
