@@ -396,6 +396,50 @@ describe('press_claim: false stone determination', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Review follow-up (post-approval, additive): a negative-bp asset Term
+// combined with 100%-false backing can drive trueScaleRaw negative before
+// the `trueScale = trueScaleRaw > 0 ? trueScaleRaw : 0` floor applies.
+// Reviewer's own probe verified this floors correctly, resolves a valid
+// band with no crash, and betrayal still fires off the pre-resolution
+// snapshot -- this pins that exact shape as a regression test. Honest
+// GREEN-from-start: the floor was already correct and untouched by this
+// addition (see this file's task-3 report appendix for the mutation check
+// confirming the assertion is non-vacuous).
+// ---------------------------------------------------------------------------
+describe('press_claim: negative trueScale floors at 0 (reviewer-verified probe, additive regression)', () => {
+  it('a negative-bp asset Term (true) + 100%-false backing drives trueScaleRaw negative; trueScale floors at 0, a valid band resolves with no throw, and betrayal still fires', () => {
+    let g = crownGraph({ alwaysTrue: true });
+    // The ENTIRE backing is this one false stone: bp 2000, loyalty 1000
+    // (<TREACHERY_BP), cunning -- so falseStoneBp == backingSum exactly.
+    g = withBacker(g, 'char:mair', 2000, { loyalty: 1000, cunning: true });
+    const def: FlashpointDef = {
+      // True (alwaysTrue holds) and negative: assetSum = -500.
+      assets: [{ label: 'Poisoned Well', bp: -500, when: { nodeId: 'inst:crown', prop: 'alwaysTrue', cmp: 'eq', value: true } }],
+      opposition: elseRowOpposition(),
+      onBand: EMPTY_ON_BAND,
+    };
+    // visibleScale = 2000 + (-500) = 1500; falseStoneBp = 2000 (100% of
+    // backing); trueScaleRaw = 1500 - 2000 = -500 -- negative before the
+    // floor. r = flashpointRatio(0, opposition) = 0 regardless of
+    // opposition's value once trueScale floors to 0, so this still falls in
+    // the "else" row (minR 0) -- reuses ELSE_ROUT (row-family-scoped, not
+    // r-value-scoped: r=0 satisfies the SAME r<600 condition every other
+    // ELSE_ROUT reuse in this file relies on), landing its already-verified
+    // 'rout' outcome.
+    const { g2, em, flashpointEvent } = pressClaim(g, def, ELSE_ROUT);
+
+    const data = flashpointEvent.data as { band: string; trueScale: number };
+    expect(data.trueScale).toBe(0); // floored, not -500
+    expect(['rout', 'setback', 'costly', 'triumph']).toContain(data.band); // a valid band resolved -- bandRowFor(0) did not throw
+    expect(data.band).toBe('rout'); // this pin's own known, already-verified outcome
+
+    const betrayedEv = em.all().find((e) => e.type === 'claim.betrayed');
+    expect(betrayedEv?.data).toEqual({ charId: 'char:mair' }); // betrayal still fires off the pre-resolution snapshot
+    expect(findEdge(g2, 'backing', 'char:mair', 'inst:crown')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Controller-pinned seam #1: decisive outcomes. triumph/costly with
 // decisive.promoteTo stamp claimPromoteTo; rout with demoteOnRoutTo stamps
 // claimDemoteTo; setback touches NEITHER, even when both fields are
