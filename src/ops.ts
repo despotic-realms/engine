@@ -1337,6 +1337,15 @@ export function applyOp(
           em.emit('claim.swayed', { parents: [flashpointEvent.id], data: { charIds: waverers, direction: 'toward' }, deltas: nudgeDeltas });
         }
       } else if (band === 'rout' || band === 'setback') {
+        // declaredBackers is intentionally NOT filtered by `imprisoned`, an
+        // asymmetry with isWaverer's own exclusion worth naming: isWaverer
+        // excludes an imprisoned character because nudging them TOWARD a
+        // declaration a cell would block anyway is inert, so the exclusion
+        // costs nothing. A declared backer already declared -- imprisoning
+        // them afterward doesn't retract that fact (only departure's own
+        // backing-edge removal does), so their momentum souring alongside
+        // every other backer's is the correct read, not a case needing the
+        // same guard.
         const declaredBackers = edgesOfType(g2, 'backing').map((e) => e.src);
         const waverers = nodeIds(g2).filter((id) => isWaverer(g2, id, rulerId));
         const affected = [...declaredBackers, ...waverers].sort();
