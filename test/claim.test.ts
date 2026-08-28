@@ -19,14 +19,16 @@ import { hashValue } from '../src/canon.js';
 import { applyDeltas, makeEmitter } from '../src/events.js';
 import { fx } from '../src/fx.js';
 import { makeFortune } from '../src/fortune.js';
-import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode } from '../src/graph.js';
+import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode, propFx, setEdgeProp } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
 import type { CharacterArc } from '../src/arcs.js';
 import { advanceCharacterArcs } from '../src/arcs.js';
-import { applyOp } from '../src/ops.js';
+import { DEEDS, OP_KINDS, applyOp, validateOp } from '../src/ops.js';
+import { WANT_KEYS } from '../src/spine.js';
 import { declarationStep } from '../src/systems.js';
 import { initialState, resolveTick } from '../src/tick.js';
 import type { SeasonConfig } from '../src/tick.js';
+import type { Storylet } from '../src/storylet.js';
 
 /** Minimal claim fixture: inst:crown (rulerCharId char:ruler, legitimacy as
  *  given) + the ruler node alone -- callers add circle characters (and any
@@ -618,5 +620,251 @@ describe('arc departure withdraws an existing backing edge (claim §1)', () => {
     out = advanceCharacterArcs(g, 12, arcs, em, 'char:rival'); // stage 3: departs
     g = out.g;
     expect(findEdge(g, 'backing', 'char:x', 'inst:crown')).toBeUndefined(); // withdrawn on departure
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2: the `pledge` op and the `promise` edge (claim plan §2). `pledge`
+// buys a circle character's declaration with the crown's word instead of an
+// answered price -- validated against the SAME `currentWant` the
+// declaration pass above already reads (ops.ts imports it from spine.ts for
+// exactly this reason, so the two checks can never drift apart). Domain:
+// null (direct throne speech, like appoint/pardon) -- never mediated; no
+// treasury cost; no deed fingerprint (the `promise` edge it writes is
+// itself the gateable fact -- ops.ts's own DEEDS-table comment carries the
+// exclusion note).
+// ---------------------------------------------------------------------------
+
+/** crownGraph('0') + one character carrying a TWO-want chain, wantIndex 0 --
+ *  currentWant is 'holding'; 'coin' is a real want of theirs (position 1 in
+ *  the chain) but is NOT current -- the exact shape the "wantKey is in the
+ *  chain but not current" rejection needs to distinguish from "not a want
+ *  of theirs at all". No claimCircle/loyalty marks: pledge's OWN
+ *  validations need neither (only the declaration pass, a separate
+ *  concern below, does). */
+function pledgeGraph(): WorldGraph {
+  let g = crownGraph('0');
+  g = addNode(g, {
+    id: 'char:tam', type: 'character',
+    props: { name: 'Old Tam', wantChain: ['holding', 'coin'], wantIndex: 0 },
+  });
+  return g;
+}
+
+describe('OP_KINDS: pledge is registered as a null-domain (direct throne speech) closed-vocabulary op', () => {
+  it('carries domain null, like appoint/pardon/record_stance -- never mediated', () => {
+    expect(OP_KINDS['pledge'].domain).toBe(null);
+  });
+  it('params: charId is a character nodeId, wantKey is a WANT_KEYS enum', () => {
+    expect(OP_KINDS['pledge'].params).toEqual([
+      { name: 'charId', type: 'nodeId', nodeType: 'character' },
+      { name: 'wantKey', type: 'enum', values: WANT_KEYS },
+    ]);
+  });
+  it('is excluded from DEEDS -- no fingerprint stamp (the promise edge itself is the gateable fact)', () => {
+    expect(Object.prototype.hasOwnProperty.call(DEEDS, 'pledge')).toBe(false);
+  });
+});
+
+describe('validateOp: pledge', () => {
+  it('accepts a pledge naming the current want', () => {
+    const g = pledgeGraph();
+    expect(validateOp(g, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }).ok).toBe(true);
+  });
+
+  it('rejects a charId that does not exist', () => {
+    const g = pledgeGraph();
+    const r = validateOp(g, { kind: 'pledge', charId: 'char:nobody', wantKey: 'holding' });
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a wantKey that names no want of theirs at all (not in the chain)', () => {
+    const g = pledgeGraph();
+    const r = validateOp(g, { kind: 'pledge', charId: 'char:tam', wantKey: 'pardon' });
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a wantKey that IS a real want of theirs (in the chain) but is not the CURRENT one', () => {
+    const g = pledgeGraph(); // wantChain ['holding','coin'], wantIndex 0 -- 'coin' is real but not current
+    const r = validateOp(g, { kind: 'pledge', charId: 'char:tam', wantKey: 'coin' });
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a second pledge to a character who already carries an unbroken promise', () => {
+    const g0 = pledgeGraph();
+    const g1 = applyOp(g0, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }, 1, makeEmitter(1), 'seat:throne');
+    const r = validateOp(g1, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' });
+    expect(r.ok).toBe(false);
+  });
+
+  // Confirms the rejection above keys on UNBROKEN specifically (mirrors
+  // declarationStep's own "broken: true doesn't satisfy" pin above) --
+  // promise-BREAKING mechanics are out of scope this round (Global
+  // Constraints), but a hand-flipped broken flag must not permanently wall
+  // off a character from ever being pledged to again.
+  it('a BROKEN existing promise does not block a new pledge to the same character', () => {
+    const g0 = pledgeGraph();
+    const g1 = applyOp(g0, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }, 1, makeEmitter(1), 'seat:throne');
+    const g2 = setEdgeProp(g1, edgeId('promise', 'inst:crown', 'char:tam'), 'broken', true);
+    expect(validateOp(g2, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }).ok).toBe(true);
+  });
+});
+
+describe('applyOp: pledge', () => {
+  it('plants a promise edge with the exact shape (byte-exact), no treasury cost, delta-complete and replay-equivalent (D14)', () => {
+    const g0 = pledgeGraph();
+    const em = makeEmitter(7);
+    const g = applyOp(g0, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }, 7, em, 'seat:throne');
+
+    const edge = findEdge(g, 'promise', 'inst:crown', 'char:tam');
+    expect(edge).toBeDefined();
+    expect(edge?.props).toEqual({ wantKey: 'holding', madeAt: 7, dueOn: 'restoration', broken: false });
+    expect(edge?.id).toBe(edgeId('promise', 'inst:crown', 'char:tam'));
+
+    // No treasury cost (Global Constraints).
+    expect(propFx(getNode(g, 'inst:crown').props, 'treasury')).toBe(propFx(getNode(g0, 'inst:crown').props, 'treasury'));
+
+    const ev = em.all().find((e) => e.type === 'op.pledge')!;
+    expect(ev).toBeDefined();
+    expect(ev.parents).toEqual([]);
+    expect(ev.data).toEqual({ kind: 'pledge', charId: 'char:tam', wantKey: 'holding' });
+    expect(ev.deltas).toEqual([
+      {
+        op: 'edge.add',
+        edge: {
+          id: edgeId('promise', 'inst:crown', 'char:tam'),
+          type: 'promise', src: 'inst:crown', dst: 'char:tam',
+          props: { wantKey: 'holding', madeAt: 7, dueOn: 'restoration', broken: false },
+        },
+      },
+    ]); // delta-complete: this is the op's ENTIRE effect (D14)
+
+    // No fingerprint: pledge is deliberately excluded from DEEDS -- confirm
+    // no recent:* prop lands on the target as a side effect of applying it.
+    expect(Object.keys(getNode(g, 'char:tam').props).some((k) => k.startsWith('recent:'))).toBe(false);
+
+    const replayed = applyDeltas(g0, ev.deltas);
+    expect(hashValue(replayed)).toBe(hashValue(g));
+  });
+
+  it('determinism: two independent applications from the same pre-state produce byte-identical graphs', () => {
+    const g0 = pledgeGraph();
+    const gA = applyOp(g0, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }, 5, makeEmitter(5), 'seat:throne');
+    const gB = applyOp(g0, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }, 5, makeEmitter(5), 'seat:throne');
+    expect(hashValue(gA)).toBe(hashValue(gB));
+  });
+});
+
+// Composition (i): a REAL pledge (not a hand-built edge, contrast the
+// promise-edge OR-branch suite above, which predates this op) feeds
+// straight into the declaration pass on the very next tick. Uses a char
+// with wantIndex 0 (never fulfilled anything) so the promise is the ONLY
+// possible qualifier -- isolates this test from the overlap case (already
+// pinned above; not re-tested per the task brief's own instruction).
+describe('pledge composes with the declaration pass (claim §2)', () => {
+  it("a real pledge, read by declarationStep next tick, declares with viaPromise = the pledge's own promise-edge id", () => {
+    let g = crownGraph('0');
+    g = addNode(g, {
+      id: 'char:tam', type: 'character',
+      props: { name: 'Old Tam', claimCircle: true, claimBp: 1200, wantChain: ['holding'], wantIndex: 0 },
+    });
+    g = addEdge(g, { type: 'loyalty', src: 'char:tam', dst: 'char:ruler', props: { bp: 6000 } });
+
+    const g2 = applyOp(g, { kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }, 1, makeEmitter(1), 'seat:throne');
+    const promiseEdge = findEdge(g2, 'promise', 'inst:crown', 'char:tam');
+    expect(promiseEdge).toBeDefined();
+
+    const em2 = makeEmitter(2);
+    const g3 = declarationStep(g2, 2, em2);
+    const backing = findEdge(g3, 'backing', 'char:tam', 'inst:crown');
+    expect(backing).toBeDefined();
+    expect(backing?.props).toEqual({ declaredAt: 2, bp: 1200, viaPromise: promiseEdge!.id });
+    expect(em2.all()[0]?.data).toEqual({ charId: 'char:tam', bp: 1200, viaPromise: promiseEdge!.id });
+  });
+});
+
+// Composition (ii): T2 attribution (causality §1+§2). Mirrors test/
+// fingerprints.test.ts's and test/debt.test.ts's own "op composes with
+// attribution, no special-casing" pattern exactly -- a carrier brief whose
+// option pledges, a reaction brief gated on the `promise` edge existing
+// (fully literal-pinned: both endpoints named, no unbound node var needed),
+// on a from-scratch minimal season (mirrors this file's own "wired into
+// resolveTick" describe block above, not starterSeason() -- no dependency
+// on thornfieldGraph's character roster is needed here).
+describe('pledge composes with T2 attribution (claim §2, no special-casing)', () => {
+  it('a pledge op writing a promise edge makes a promise-edge-gated brief newly-eligible next tick, attributed to that op', () => {
+    let g = emptyGraph();
+    g = addNode(g, {
+      id: 'inst:crown', type: 'institution',
+      props: { treasury: fx('300'), legitimacy: fx('0'), arrears: fx('0'), rulerCharId: 'char:ruler' },
+    });
+    g = addNode(g, {
+      id: 'place:ash', type: 'place',
+      props: {
+        name: 'Ash', population: fx('100'), granary: fx('250'), farmland: fx('10'),
+        unrest: fx('10'), dole: fx('0'), taxRateBp: 1000, roadsBonusBp: 0, defenseBp: 0,
+        famineStage: 0, famineEndsAt: 0, levy: fx('0'),
+      },
+    });
+    g = addNode(g, { id: 'char:ruler', type: 'character', props: { name: 'Ruler' } });
+    g = addNode(g, {
+      id: 'char:tam', type: 'character',
+      props: { name: 'Old Tam', wantChain: ['holding'], wantIndex: 0 }, // currentWant = 'holding'
+    });
+
+    const carrier: Storylet = {
+      id: 'pledge.carrier', kind: 'brief', tier: 1, cooldownTicks: 0, once: false,
+      pattern: { nodes: [{ as: 'p', type: 'place' }] },
+      title: 'Carrier', body: 'Carrier',
+      options: [
+        { id: 'pledge-tam', label: 'Pledge to Old Tam', ops: [{ kind: 'pledge', charId: 'char:tam', wantKey: 'holding' }] },
+        { id: 'skip', label: 'Skip', ops: [] },
+      ],
+      defaultOptionId: 'skip',
+    };
+    const reaction: Storylet = {
+      id: 'pledge.reaction', kind: 'brief', tier: 1, cooldownTicks: 0, once: false,
+      // Zero node vars: both edge endpoints are literal-pinned, so the
+      // pattern needs no bound var at all -- matchPattern's own walk(0,{})
+      // resolves the edge purely off the '#'-literals (match.ts).
+      pattern: { nodes: [], edges: [{ type: 'promise', from: '#inst:crown', to: '#char:tam' }] },
+      title: 'Reaction', body: 'Reaction',
+      options: [{ id: 'ack', label: 'Acknowledge', ops: [] }, { id: 'skip', label: 'Skip', ops: [] }],
+      defaultOptionId: 'skip',
+    };
+
+    const season: SeasonConfig = {
+      seasonId: 'pledge-attribution-compose',
+      startTier: 1,
+      initialGraph: g,
+      decks: [{ id: 'claim-deck', tier: 1, storylets: [carrier, reaction] }],
+      tiers: { 1: { deckIds: ['claim-deck'], briefBudget: 2, attentionSlots: 2 } },
+      calendar: [],
+      tierRules: [],
+      throne: { id: 'seat:throne', kind: 'throne', bodyCharId: 'char:ruler', attentionSlots: 2, fidelity: 'external' },
+      reporters: [],
+      primaryPlaceId: 'place:ash',
+    };
+    const f = makeFortune('pledge-attribution-compose');
+
+    // Tick 1: only the carrier is eligible -- no promise edge exists yet.
+    const out1 = resolveTick(season, initialState(season), { seatId: 'seat:throne', choices: [] }, f);
+    expect(out1.packet.briefs.map((b) => b.storyletId)).toEqual(['pledge.carrier']);
+    const carrierBrief = out1.packet.briefs[0]!;
+
+    // Tick 2: choosing 'pledge-tam' writes the promise edge as PART of
+    // resolving this tick -- pledge.reaction becomes newly-eligible off
+    // that very write and must be attributed to the op's own event.
+    const out2 = resolveTick(season, out1.state, {
+      seatId: 'seat:throne',
+      choices: [{ briefId: carrierBrief.briefId, optionId: 'pledge-tam' }],
+    }, f);
+    expect(out2.packet.briefs.map((b) => b.storyletId)).toContain('pledge.reaction');
+
+    const opEvent = out2.events.find((e) => e.type === 'op.pledge')!;
+    expect(opEvent).toBeDefined();
+    expect(findEdge(out2.state.graph, 'promise', 'inst:crown', 'char:tam')).toBeDefined();
+    const reactionBrief = out2.packet.briefs.find((b) => b.storyletId === 'pledge.reaction')!;
+    expect(reactionBrief.becauseOf).toEqual([opEvent.id]);
   });
 });

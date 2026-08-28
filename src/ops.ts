@@ -17,6 +17,15 @@ import type { Fx } from './fx.js';
 import { clampFx, divFx, fx, fxToString, fxWhole, mulFx, FX_ZERO } from './fx.js';
 import type { NodeType, WorldGraph } from './graph.js';
 import { appendAllegianceLog, edgeId, edgesFrom, edgesTo, findEdge, getNode, propFx, propStr } from './graph.js';
+// Claim §2's own closed vocabulary lives in spine.ts (WANT_KEYS/WantKey,
+// the same source declarationStep's currentWant reads via systems.ts) --
+// pulled in here rather than re-declared so pledge's enum param and
+// systems.ts's price-answered check can never drift apart. Runtime-safe
+// despite the reverse edge (spine.ts imports `Op` from this very file):
+// that import is `import type`, erased before either module exists at
+// runtime, so no real import cycle exists, only a type-level one.
+import { currentWant, WANT_KEYS } from './spine.js';
+import type { WantKey } from './spine.js';
 
 export type Op =
   | { kind: 'decree_tax'; placeId: string; rateBp: number }
@@ -42,7 +51,17 @@ export type Op =
   // DEEDS below and systems.ts's debtOverdueStep for how the two shapes
   // coexist without either ever reading/writing the other's props).
   | { kind: 'borrow'; lenderId: string; amount: string; fee: string; dueTicks: number }
-  | { kind: 'repay'; lenderId: string };
+  | { kind: 'repay'; lenderId: string }
+  // Claim §2 (2026-08-20 claim plan, Global Constraints -- verbatim-binding
+  // shape): a binding promise, buying a backer's declaration now against a
+  // restoration the ruler doesn't have yet. Direct throne speech (domain:
+  // null, like appoint/pardon) -- never mediated (mediate.ts's own
+  // `domain === null` skip runs applyOp straight through); no treasury
+  // cost. Deliberately excluded from DEEDS/DEED_NAMES below (see that
+  // table's own comment for why): the `promise` edge this writes (graph.ts,
+  // added in Task 1 as a compile necessity ahead of this op) is itself the
+  // gateable fact content reads, not a fingerprint standing in for one.
+  | { kind: 'pledge'; charId: string; wantKey: WantKey };
 
 export interface OpParamDesc {
   name: string;
@@ -193,6 +212,14 @@ export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc
     summary: 'Repay an outstanding debt to a lender in full (principal + fee); the debt obligation is cleared.',
     params: [{ name: 'lenderId', type: 'nodeId' }],
     domain: 'econ',
+  },
+  pledge: {
+    summary: 'Pledge to a character, naming their current want; honored if the ruler is restored.',
+    params: [
+      { name: 'charId', type: 'nodeId', nodeType: 'character' },
+      { name: 'wantKey', type: 'enum', values: WANT_KEYS },
+    ],
+    domain: null,
   },
 };
 
@@ -385,6 +412,27 @@ export function validateOp(g: WorldGraph, raw: unknown): OpResult {
       if (total > t) return { ok: false, error: 'treasury cannot afford to repay that debt' };
       break;
     }
+    case 'pledge': {
+      // Claim §2 (Global Constraints, verbatim): "wantKey is the char's
+      // CURRENT want (`currentWant`)" -- not merely a real want of theirs
+      // somewhere in the chain. Reads the SAME helper declarationStep
+      // (systems.ts) checks against, so a pledge that validates here is
+      // guaranteed to satisfy that pass's own promise-branch predicate --
+      // the two checks structurally cannot drift apart.
+      const charId = op['charId'] as string;
+      const wantKey = op['wantKey'] as string;
+      if (currentWant(g, charId) !== wantKey) return { ok: false, error: `'${wantKey}' is not ${charId}'s current want` };
+      // "no existing unbroken promise edge to that char" -- mirrors
+      // declarationStep's own `props['broken'] !== true` reading of
+      // "unbroken" (systems.ts), not a bespoke `=== false` check, so a
+      // future promise-breaking mechanic (out of scope this round, Global
+      // Constraints) that marks a promise broken by some means OTHER than
+      // literally setting `broken: true` still reads consistently on both
+      // sides.
+      const existing = findEdge(g, 'promise', 'inst:crown', charId);
+      if (existing && existing.props['broken'] !== true) return { ok: false, error: 'an unbroken promise already exists for that character' };
+      break;
+    }
   }
   return { ok: true, op: op as unknown as Op };
 }
@@ -430,7 +478,9 @@ export const FINGERPRINT_TICKS = 3;
 // compile error, not a silent dead branch. Every op kind absent from BOTH
 // tables never stamps: record_stance/obscure_records by spec exclusion
 // (stances are already the durable marker); disband_levy was simply never
-// added to the v1 deed vocabulary.
+// added to the v1 deed vocabulary; pledge (claim §2, 2026-08-20 claim plan)
+// is deliberately excluded too -- the `promise` edge it writes is itself
+// the gateable fact content reads, not a fingerprint standing in for one.
 export const DEEDS: Partial<Record<Exclude<Op['kind'], 'send_envoy'>, Deed>> = {
   grant: 'granted',
   seize: 'seized',
@@ -846,6 +896,24 @@ export function applyOp(g: WorldGraph, op: Op, tick: number, em: Emitter, seatId
       // computed-data precedent (found/skimmed/holder spread alongside
       // {...op} above).
       em.emit('op.repay', { parents, data: { ...op, principal: fxToString(principal), fee: fxToString(fee), total: fxToString(total) }, deltas });
+      return g2;
+    }
+    case 'pledge': {
+      // The op's ENTIRE effect is this one edge.add (D14: delta-complete) --
+      // no treasury cost, no stampDeed (pledge is deliberately excluded
+      // from DEEDS, see that table's own comment above): the promise edge
+      // itself is the gateable fact content and declarationStep read, not a
+      // fingerprint standing in for one.
+      const deltas: GraphDelta[] = [{
+        op: 'edge.add',
+        edge: {
+          id: edgeId('promise', 'inst:crown', op.charId),
+          type: 'promise', src: 'inst:crown', dst: op.charId,
+          props: { wantKey: op.wantKey, madeAt: tick, dueOn: 'restoration', broken: false },
+        },
+      }];
+      const g2 = applyDeltas(g, deltas);
+      em.emit('op.pledge', { parents, data: { ...op }, deltas });
       return g2;
     }
   }
