@@ -45,6 +45,17 @@ import type { WantKey } from './spine.js';
 // header for why (bands.ts, imported the same one-directional way by
 // mediate.ts/observe.ts, is the precedent this follows).
 import { DECLARE_LOYALTY, effectiveLoyalty, WAVERER_FLOOR } from './loyalty.js';
+// v0.5.2 (severe exploit fix -- S-farm Finding 1, meta/.git/sdd/task-10-
+// report.md §4): validateOp's new decisive gate (below) needs the SAME
+// declaredBackingBp sum ladder.ts's own claimGateMet reads, and TierRule's
+// own shape to find "the matching rule" the same way checkLadder does. No
+// import cycle: ladder.ts's only dependency in this neighborhood is a
+// TYPE-ONLY import of StoryletOption from storylet.ts (erased at compile
+// time, never a runtime edge), and never imports anything from ops.ts --
+// report.ts already imports declaredBackingBp this exact one-directional
+// way, for its own claim projection (see that file's header comment).
+import { declaredBackingBp } from './ladder.js';
+import type { TierRule } from './ladder.js';
 
 export type Op =
   | { kind: 'decree_tax'; placeId: string; rateBp: number }
@@ -152,6 +163,17 @@ export interface FlashpointDef {
    *  ladder consumes and clears. Setback never reads either field. */
   decisive?: { promoteTo?: number; demoteOnRoutTo?: number };
   onBand: Record<FlashpointBand, Op[]>;
+  /** v0.5.2 (severe exploit fix, S-farm Finding 1, meta/.git/sdd/task-10-
+   *  report.md §4): the minimum number of ticks that must pass between two
+   *  presses of THIS flashpoint (validateOp's gate B, below). Absent or 0
+   *  means no cooldown at all -- full back-compat with every FlashpointDef
+   *  authored before this field existed. This is content's own lever for
+   *  "no repeatable grind source" (spec §3): the mechanism is the engine's,
+   *  the value is content's to set per flashpoint. Enforced against the
+   *  graph-stored last-pressed tick (lastPressedAt, below), never
+   *  ReignState -- a replay from the chronicle alone reproduces the
+   *  identical accept/reject decision a live tick made. */
+  cooldownTicks?: number;
 }
 
 export const OP_KINDS: Record<Op['kind'], { summary: string; params: OpParamDesc[]; domain: 'econ' | 'martial' | 'social' | null }> = {
@@ -369,7 +391,35 @@ function isStanceId(v: unknown): v is string {
 // call-site audit and the rejected alternative (validating flashpointId
 // existence only at validateDecisions, which never sees option-bound ops at
 // all -- see that report for why this was rejected).
-export function validateOp(g: WorldGraph, raw: unknown, flashpoints: Record<string, FlashpointDef> = {}): OpResult {
+//
+// tierRules/tier/tick (v0.5.2, severe exploit fix -- S-farm Finding 1):
+// threaded the identical way flashpoints was in T3 -- optional trailing
+// parameters, each defaulting to an inert value ([] / -1 / 0), so every
+// call site above (mediate.ts, storylet.ts's checkDeck, ops.ts's own onBand
+// loop, and the whole existing test suite) keeps compiling and passing
+// completely unchanged; only tick.ts's two REAL press_claim choke points
+// (validateDecisions's raw-ops loop, resolveTick's attended and
+// default-option loops) pass the season's real tierRules and the reign's
+// real (tier, tick). Needed for gate A (below): a decisive press must be
+// checked against the SAME (from: tier, kind: 'promote', to: promoteTo)
+// rule checkLadder itself would later match (ladder.ts) -- tier and
+// tierRules find that rule; tick is needed separately, by gate B, to read
+// "how long ago" against the graph-stored last-pressed fact. Defaulting
+// tier to -1 (never a real tier -- tiers are non-negative) rather than 0
+// means an un-threaded caller can never accidentally match a real rule at
+// tier 0; defaulting tierRules to [] means no rule can ever match at all --
+// both defaults therefore FAIL CLOSED for gate A (a decisive press with no
+// real ladder context rejects, it is never silently waved through), while
+// costing every non-press_claim op and every non-decisive press nothing,
+// since neither reads these parameters at all.
+export function validateOp(
+  g: WorldGraph,
+  raw: unknown,
+  flashpoints: Record<string, FlashpointDef> = {},
+  tierRules: readonly TierRule[] = [],
+  tier: number = -1,
+  tick: number = 0,
+): OpResult {
   if (typeof raw !== 'object' || raw === null) return { ok: false, error: 'op must be an object' };
   const op = raw as Record<string, unknown>;
   const kind = op['kind'];
@@ -535,6 +585,60 @@ export function validateOp(g: WorldGraph, raw: unknown, flashpoints: Record<stri
       if (existing) {
         if (existing.props['broken'] === true) return { ok: false, error: "the crown's word to them is already broken" };
         return { ok: false, error: 'an unbroken promise already exists for that character' };
+      }
+      break;
+    }
+    // v0.5.2 (severe exploit fix -- S-farm Finding 1, meta/.git/sdd/
+    // task-10-report.md §4): press_claim used to carry no per-attempt cost,
+    // no cooldown, and no idempotency guard of its own -- every gate lived
+    // on the STORYLET offering it, and a raw directive bypasses a
+    // storylet's dealing gate entirely (an established fact/technique in
+    // this codebase; T10's own report cites claim-campaign.test.ts and
+    // play-smoke.test.ts for it). validateOp is the one choke point every
+    // press_claim op must clear before applyOp ever runs, whether it
+    // arrived bound to a chosen storylet option or as a raw directive
+    // (resolveTick's steps 3/4 and validateDecisions' own wire-gate check
+    // all call validateOp first) -- so gating HERE closes both paths at
+    // once. Two independent mechanisms, checked in this fixed order: gate B
+    // (cooldown) first, since it is the simpler, universally-applicable
+    // check and needs no ladder context at all; gate A (the decisive gate)
+    // second, since it only ever applies to a press that could promote the
+    // reign. A press failing both reports gate B's reason -- the two are
+    // independent checks, never combined into one message.
+    case 'press_claim': {
+      const flashpointId = op['flashpointId'] as string;
+      const def = flashpoints[flashpointId]!; // existence already confirmed by the param-shape loop above
+
+      // Gate B: the press cooldown. cooldownTicks absent or 0 means no
+      // cooldown at all (full back-compat -- see FlashpointDef's own doc
+      // comment). last-pressed state is read off the GRAPH (lastPressedAt,
+      // below), never ReignState, so a replay from the chronicle alone
+      // reproduces the exact same accept/reject decision a live tick made.
+      if (def.cooldownTicks !== undefined && def.cooldownTicks > 0) {
+        const last = lastPressedAt(g, flashpointId);
+        if (last !== undefined && tick - last < def.cooldownTicks)
+          return { ok: false, error: `flashpoint '${flashpointId}' was pressed too recently and is still cooling down` };
+      }
+
+      // Gate A: the decisive gate. A press whose consequences include a
+      // claim PROMOTION for the CURRENT tier must clear the exact same
+      // claimRequire threshold checkLadder's own decisive branch
+      // (ladder.ts) would otherwise let it skip entirely -- that branch
+      // matches a decisive claimPromoteTo against the season's (from, kind,
+      // to) rule directly and never re-consults that rule's own
+      // claimRequire. Matched the identical way here: (from: tier, kind:
+      // 'promote', to: promoteTo). A non-decisive press (this flashpoint
+      // carries no promoteTo at all) is never touched by this gate -- see
+      // the switch comment above. Fails closed: no matching rule, or a
+      // matching rule with no claimRequire at all (an ordinary
+      // `when`-gated promotion has no press-time threshold for this gate to
+      // check -- the press is not how that rule fires), rejects rather than
+      // assumes the press is fine.
+      const promoteTo = def.decisive?.promoteTo;
+      if (promoteTo !== undefined) {
+        const rule = tierRules.find((r) => r.from === tier && r.kind === 'promote' && r.to === promoteTo);
+        if (!rule?.claimRequire || declaredBackingBp(g) < rule.claimRequire.backingBp || treasury(g) < rule.claimRequire.treasury)
+          return { ok: false, error: `flashpoint '${flashpointId}' cannot decide the throne yet -- the claim is not backed enough` };
       }
       break;
     }
@@ -773,6 +877,30 @@ function drawFlashpointBand(
     if (roll < acc) return band;
   }
   return 'triumph';
+}
+
+// v0.5.2 (severe exploit fix, gate B): the crown prop key a flashpoint's
+// last-pressed tick is stamped under -- one shared builder so validateOp's
+// read (lastPressedAt, just below) and applyOp's own write (the
+// 'press_claim' case, further down) can never drift on the exact key
+// string. Mirrors record_stance's own dynamic-key idiom ('stance:' +
+// stanceId) on the SAME crown node, above.
+function claimPressedAtKey(flashpointId: string): string {
+  return `claimPressedAt:${flashpointId}`;
+}
+
+/** The tick THIS flashpoint was last pressed, read off the graph (never
+ *  ReignState/module state) so it replays bit-exact like every other
+ *  press_claim fact. Absent means "never pressed" -- no cooldown can ever
+ *  apply against a press that hasn't happened yet. Safe-navigated
+ *  (`g.nodes['inst:crown']?.`), mirroring ladder.ts's own claimTarget
+ *  helper, rather than the throwing getNode: unlike validateOp's own call
+ *  site (where treasury(g) already ran first and guarantees inst:crown
+ *  exists), this is a general-purpose reader with no such precondition of
+ *  its own to lean on. */
+function lastPressedAt(g: WorldGraph, flashpointId: string): number | undefined {
+  const v = g.nodes['inst:crown']?.props[claimPressedAtKey(flashpointId)];
+  return typeof v === 'number' ? v : undefined;
 }
 
 // seatId: the DECIDING seat (causality §2) -- decisions carry seatId
@@ -1233,6 +1361,17 @@ export function applyOp(
       }
       if (band === 'rout' && def.decisive?.demoteOnRoutTo !== undefined) {
         decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: 'claimDemoteTo', value: def.decisive.demoteOnRoutTo });
+      }
+      // v0.5.2 (severe exploit fix, gate B): stamps the tick THIS press
+      // happened, keyed by flashpointId on the crown node, so a LATER
+      // press's own validateOp call can enforce def.cooldownTicks against
+      // it (lastPressedAt, above). Conditioned on cooldownTicks actually
+      // being set: a flashpoint that never declares a cooldown has nothing
+      // for gate B to ever enforce, so it pays no stamp cost at all -- every
+      // FlashpointDef fixture authored before this field existed produces
+      // the exact same deltas it always did.
+      if (def.cooldownTicks !== undefined && def.cooldownTicks > 0) {
+        decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: claimPressedAtKey(op.flashpointId), value: tick });
       }
       let g2 = applyDeltas(g, decisiveDeltas);
       const flashpointEvent = em.emit('claim.flashpoint', {

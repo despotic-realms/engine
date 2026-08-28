@@ -237,7 +237,17 @@ export function validateDecisions(season: SeasonConfig, state: ReignState, raw: 
         // press_claim op (validated here, the raw-`ops` path) is checked
         // against the REAL flashpoints table, not the {} default -- see
         // ops.ts's validateOp for the full call-site rationale.
-        const r = validateOp(state.graph, op, season.flashpoints ?? {});
+        //
+        // v0.5.2 (severe exploit fix -- S-farm Finding 1): also threads
+        // season.tierRules and the reign's own (state.tier, state.tick) --
+        // validateOp's new gate A needs the season's real ladder rules to
+        // check a decisive press against, and gate B needs the real tick to
+        // measure a cooldown against. This is the WIRE-GATE check (a raw
+        // directive's ops are validated here before resolveTick ever runs),
+        // so it must carry the same real ladder context resolveTick's own
+        // steps 3/4 do below, or a directive could slip past this earlier
+        // check on the {} / -1 / 0 defaults alone.
+        const r = validateOp(state.graph, op, season.flashpoints ?? {}, season.tierRules, state.tier, state.tick);
         if (!r.ok) return { ok: false, error: `bad op on '${briefId}': ${r.error}` };
       }
     }
@@ -397,7 +407,16 @@ export function resolveTick(
       : undefined;
     const ops = chosenOption ? bindOps(chosenOption.ops, pending.binding) : choice.ops ?? [];
     for (const op of ops) {
-      const r = validateOp(g, op, flashpoints);
+      // v0.5.2 (severe exploit fix -- S-farm Finding 1): threads
+      // season.tierRules and this tick's own (state.tier, tick) so
+      // validateOp's gate A/gate B can check a press_claim op against the
+      // real ladder context -- see ops.ts's validateOp header for the full
+      // threading rationale. `tier` here is deliberately `state.tier`, not
+      // the local `tier` variable step 8 later declares: at this point in
+      // resolveTick the ladder hasn't run yet this tick, so state.tier IS
+      // the reign's current tier for every op this loop (and step 4 below)
+      // validates.
+      const r = validateOp(g, op, flashpoints, season.tierRules, state.tier, tick);
       if (!r.ok) { em.emit('op.rejected', { parents: [decisionEvents.get(choice.briefId)!], data: { briefId: choice.briefId, op, error: r.error, via: 'option' } }); continue; }
       g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [decisionEvents.get(choice.briefId)!], flashpoints);
     }
@@ -427,7 +446,16 @@ export function resolveTick(
       data: { briefId: pending.briefId, storyletId: pending.storyletId, defaultOptionId: pending.defaultOptionId },
     });
     for (const op of defaultOption ? bindOps(defaultOption.ops, pending.binding) : []) {
-      const r = validateOp(g, op, flashpoints);
+      // v0.5.2 (severe exploit fix -- S-farm Finding 1): threads
+      // season.tierRules and this tick's own (state.tier, tick) so
+      // validateOp's gate A/gate B can check a press_claim op against the
+      // real ladder context -- see ops.ts's validateOp header for the full
+      // threading rationale. `tier` here is deliberately `state.tier`, not
+      // the local `tier` variable step 8 later declares: at this point in
+      // resolveTick the ladder hasn't run yet this tick, so state.tier IS
+      // the reign's current tier for every op this loop (and step 4 below)
+      // validates.
+      const r = validateOp(g, op, flashpoints, season.tierRules, state.tier, tick);
       if (r.ok) {
         g = applyOpWithWants(g, tierCfg, r.op, tick, fortune, em, decisions.seatId, [ev.id], flashpoints);
       } else em.emit('op.rejected', { parents: [ev.id], data: { briefId: pending.briefId, op, error: r.error, via: 'default' } });
