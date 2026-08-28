@@ -472,13 +472,13 @@ export function resolveTick(
   g = economyStep(g, tick, fortune, em);
   g = socialStep(g, tick, em);
   // Claim §1-2 (2026-08-20 claim plan): the declaration pass, immediately
-  // after socialStep per the plan's own instruction -- and load-bearing
-  // here specifically, not just a convenient adjacency: it must run BEFORE
-  // advanceCharacterArcs below (character-arc departure cuts a defector's
-  // loyalty edge, which would otherwise read back as the neutral 5000
-  // default and could freshly declare a character the same tick they
-  // defect). See systems.ts's declarationStep header for the full
-  // placement rationale.
+  // after socialStep per the plan's own instruction. Placed BEFORE
+  // advanceCharacterArcs below (character-arc departure) as defense-in-depth
+  // against a defector re-declaring the same tick they defect -- the pass
+  // itself also refuses to declare anyone with no loyalty edge at all
+  // (controller adjudication, 2026-08-27), which closes that specific hole
+  // independent of this ordering too. See systems.ts's declarationStep
+  // header for the full placement rationale and the exclusions.
   g = declarationStep(g, tick, em);
   // Causality §2: deed fingerprint decay, adjacent to socialStep (systems.ts)
   // -- placed here for the same "no dependency either way" reason advanceArcs

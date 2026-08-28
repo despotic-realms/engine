@@ -426,30 +426,52 @@ export function debtOverdueStep(g0: WorldGraph, tick: number, em: Emitter): Worl
 // entry, so the first path (wantIndex > 0) already covers them.
 //
 // Placement (tick.ts): immediately after socialStep, before
-// fingerprintDecayStep -- per the plan's explicit instruction, and load-
-// bearing for one same-tick interaction beyond that: it must run BEFORE
-// advanceCharacterArcs (character departure). A departing character's TRUE
+// fingerprintDecayStep -- per the plan's explicit instruction. Originally
+// also justified as load-bearing for a same-tick interaction with
+// advanceCharacterArcs (character departure): a departing character's TRUE
 // loyalty is necessarily low that tick (arcs.ts's retention check already
 // ruled out >= 5500 true bp, or they'd have retained instead), but
 // EFFECTIVE loyalty (this pass's own formula) can still clear
 // DECLARE_LOYALTY on a large legitimacy bonus alone -- exactly the "false
 // stone" shape the plan's own betrayal mechanic (Task 3) is built around,
-// not a bug to design around. Running AFTER advanceCharacterArcs instead
-// would be the real bug: a just-departed character's loyalty edge to the
-// ruler is gone (departureDeltas cuts it, extended below to also cut any
-// backing edge), so effectiveLoyalty would read the neutral 5000 DEFAULT in
-// its place -- inflating, never deflating, their score -- and could freshly
-// (re-)declare a character the very same tick they defected to the rival's
-// court. Placed before fingerprintDecayStep/debtOverdueStep/advanceArcs too
-// for the same reason those three sit beside each other: fully disjoint
-// prop/edge sets (claimCircle/claimBp/backing/promise vs. recent:<deed> vs.
-// debt-edge props vs. famine/character-arc props), so ordering among THEM
-// only affects which of this tick's events sort first, never the outcome --
-// the one real dependency (running before character-arc departure) is the
-// placement choice itself.
-function effectiveLoyalty(g: WorldGraph, charId: string, rulerId: string): number {
-  const loyaltyEdge = findEdge(g, 'loyalty', charId, rulerId);
-  const loyalty = typeof loyaltyEdge?.props['bp'] === 'number' ? (loyaltyEdge.props['bp'] as number) : 5000;
+// not a bug to design around. Running the pass AFTER advanceCharacterArcs
+// used to be a real bug for exactly this reason (a just-departed
+// character's loyalty edge is gone, and effectiveLoyalty would read the
+// neutral 5000 DEFAULT in its place). Controller adjudication (2026-08-27,
+// post-review) closed that hole a second, more robust way too -- see the
+// "Exclusions" paragraph below -- so this placement choice is now
+// defense-in-depth rather than the only thing standing between a defector
+// and a fresh declaration; it is kept because it is still correct and still
+// the plan's own instructed position. Placed before fingerprintDecayStep/
+// debtOverdueStep/advanceArcs too for the same reason those three sit
+// beside each other: fully disjoint prop/edge sets (claimCircle/claimBp/
+// backing/promise vs. recent:<deed> vs. debt-edge props vs. famine/
+// character-arc props), so ordering among THEM only affects which of this
+// tick's events sort first, never the outcome.
+//
+// Exclusions (controller adjudication, 2026-08-27, post-review): two gates
+// closed after the initial implementation was reviewed against the "false
+// stone" reasoning above. (1) Declaring REQUIRES an actual `loyalty` edge to
+// the ruler -- no default-5000 qualification. Without this, a departed
+// character (departureDeltas, arcs.ts, cuts their loyalty edge on the way
+// out) would read the neutral default and, on a high enough legitimacy
+// bonus alone, could "declare" for the crown from the rival's own court --
+// independent of this pass's placement relative to advanceCharacterArcs, and
+// closing the same hole for any FUTURE character who simply never had a
+// loyalty edge authored at all. (2) `imprisoned === true` characters never
+// declare -- a cell is not a court -- gated on the character's own prop, so
+// the exclusion is TEMPORARY by construction: `pardon` (ops.ts) flips
+// `imprisoned` back to false with no special-casing needed here, and the
+// very next tick's pass simply sees the flag cleared. Both pinned in
+// test/claim.test.ts's "exclusions" suite: the departed-re-declare repro,
+// and an imprisoned-then-pardoned character declaring only after the pardon.
+// Controller adjudication (2026-08-27, post-review): takes the character's
+// TRUE loyalty bp as an already-resolved number rather than re-deriving it
+// from a (charId, rulerId) pair internally, so the loyalty-EDGE-EXISTENCE
+// decision lives exactly once, at declarationStep's own call site below --
+// this function is never the place a "no edge" case could quietly default
+// to neutral again.
+function effectiveLoyalty(g: WorldGraph, charId: string, trueLoyaltyBp: number): number {
   // claimNudge: a char prop written by momentum (Task 4); absent (this
   // task, and any character Task 4 has never touched) reads as 0 -- the
   // same "absent means the neutral default" idiom aptOf/loyaltyBp/wealthOf
@@ -458,7 +480,7 @@ function effectiveLoyalty(g: WorldGraph, charId: string, rulerId: string): numbe
   const claimNudge = typeof nudgeVal === 'number' ? nudgeVal : 0;
   const legitimacy = propFx(getNode(g, 'inst:crown').props, 'legitimacy');
   const legitimacyWholePoints = Number(fxWhole(legitimacy));
-  return loyalty + claimNudge + legitimacyWholePoints * 20;
+  return trueLoyaltyBp + claimNudge + legitimacyWholePoints * 20;
 }
 
 /** The effective-loyalty threshold a circle character's score must clear
@@ -475,6 +497,13 @@ export function declarationStep(g0: WorldGraph, tick: number, em: Emitter): Worl
     if (node.type !== 'character') continue;
     if (node.props['claimCircle'] !== true) continue; // circle definition is an AND -- both marks required
     if (typeof node.props['claimBp'] !== 'number') continue;
+    // Controller adjudication (2026-08-27, post-review): a cell is not a
+    // court. Gated on the character's OWN `imprisoned` prop, so this is
+    // temporary by construction -- ops.ts's `pardon` flips it back to false
+    // with no special-casing needed here; the very next tick's pass simply
+    // sees the flag cleared and proceeds normally (test/claim.test.ts's
+    // "imprisoned then pardoned" pin).
+    if (node.props['imprisoned'] === true) continue;
     if (findEdge(g, 'backing', charId, 'inst:crown')) continue; // already declared -- never re-processed, never retracted here
 
     const wantIndexVal = node.props['wantIndex'];
@@ -485,7 +514,21 @@ export function declarationStep(g0: WorldGraph, tick: number, em: Emitter): Worl
     const pledged = promiseEdge !== undefined && promiseEdge.props['broken'] !== true && promiseEdge.props['wantKey'] === want;
     if (!anyWantFulfilled && !pledged) continue; // price unanswered -- neither path holds
 
-    if (effectiveLoyalty(g, charId, rulerId) < DECLARE_LOYALTY) continue;
+    // Controller adjudication (2026-08-27, post-review): declaring requires
+    // an ACTUAL loyalty edge to the ruler -- no default-5000 qualification.
+    // Without this, a departed defector (departureDeltas, arcs.ts, cuts
+    // their loyalty edge on the way out) would read the neutral default
+    // here and, on a high enough legitimacy bonus alone, could "declare"
+    // for the crown from the rival's own court -- a deserter backing the
+    // very claim they just deserted. An absent edge is ineligible, full
+    // stop; only an edge that actually EXISTS gets its bp read (defensively
+    // defaulted to 5000 ONLY if that edge's own `bp` prop is somehow
+    // malformed -- a structurally different, much narrower fallback than
+    // "no edge exists at all").
+    const loyaltyEdge = findEdge(g, 'loyalty', charId, rulerId);
+    if (!loyaltyEdge) continue;
+    const trueLoyalty = typeof loyaltyEdge.props['bp'] === 'number' ? (loyaltyEdge.props['bp'] as number) : 5000;
+    if (effectiveLoyalty(g, charId, trueLoyalty) < DECLARE_LOYALTY) continue;
 
     const bp = node.props['claimBp'];
     const viaPromise = pledged && promiseEdge ? promiseEdge.id : '';

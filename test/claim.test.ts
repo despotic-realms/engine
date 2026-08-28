@@ -23,6 +23,7 @@ import { addEdge, addNode, edgeId, emptyGraph, findEdge, getNode } from '../src/
 import type { WorldGraph } from '../src/graph.js';
 import type { CharacterArc } from '../src/arcs.js';
 import { advanceCharacterArcs } from '../src/arcs.js';
+import { applyOp } from '../src/ops.js';
 import { declarationStep } from '../src/systems.js';
 import { initialState, resolveTick } from '../src/tick.js';
 import type { SeasonConfig } from '../src/tick.js';
@@ -134,16 +135,90 @@ describe('declarationStep', () => {
       expect(findEdge(post, 'backing', 'char:nudged', 'inst:crown')).toBeDefined();
     });
 
-    it('no loyalty edge at all: defaults to neutral 5000, same boundary math applies (legitimacy 25 -> declares)', () => {
-      let g = crownGraph('25');
+    // Controller adjudication (2026-08-27, post-review): declaring requires
+    // an ACTUAL loyalty edge -- no default-5000 qualification. This
+    // supersedes an earlier version of this test that pinned the opposite
+    // (a no-edge character defaulting to neutral 5000 and declaring); that
+    // reading was the exact bug the controller's fix closes (see the
+    // "the departed-re-declare repro" test below for the real-mechanism
+    // version of this same concern).
+    it('no loyalty edge at all: ineligible regardless of legitimacy -- the absent-edge default no longer qualifies a declaration', () => {
+      let g = crownGraph('25'); // 25*20=500 -- would have bridged a 5000 default to exactly 5500 under the old (buggy) behavior
       g = addNode(g, {
         id: 'char:noedge', type: 'character',
         props: { name: 'No Edge', claimCircle: true, claimBp: 500, wantChain: ['coin'], wantIndex: 1 },
       });
-      // No loyalty edge added -- defaults to 5000, same idiom as mediate.ts/arcs.ts/ops.ts.
+      // No loyalty edge added at all -- not even a low-bp one.
       const em = makeEmitter(1);
       const post = declarationStep(g, 1, em);
-      expect(findEdge(post, 'backing', 'char:noedge', 'inst:crown')).toBeDefined();
+      expect(findEdge(post, 'backing', 'char:noedge', 'inst:crown')).toBeUndefined();
+      expect(em.all()).toHaveLength(0);
+      expect(hashValue(post)).toBe(hashValue(g));
+    });
+  });
+
+  // Controller adjudication (2026-08-27, post-review): two exclusions closed
+  // after the initial implementation was reviewed. (1) Declaring requires an
+  // ACTUAL loyalty edge to the ruler -- a departed character (departureDeltas
+  // cuts their loyalty edge) must never re-declare via the absent-edge
+  // default. (2) An imprisoned circle character never declares -- a cell is
+  // not a court -- but the exclusion is TEMPORARY: pardoning clears it.
+  describe('exclusions: no loyalty edge, and imprisonment (controller adjudication, 2026-08-27)', () => {
+    it('the departed-re-declare repro: a character who departs (real departureDeltas removal, via advanceCharacterArcs) never freshly declares afterward, even with legitimacy high enough to have bridged the old neutral-default bug', () => {
+      // legitimacy 30 -- 30*20=600; 5000 (the old buggy default) + 600 =
+      // 5600 >= 5500 would have wrongly declared this character under the
+      // pre-fix code. wantChain has a SECOND, still-outstanding want
+      // ('office') so the restless arc doesn't auto-retain on a null
+      // currentWant (arcs.ts retains immediately once a character is fully
+      // sated) -- 'coin' is already fulfilled (wantIndex 1), satisfying
+      // declarationStep's price-answered condition on its own.
+      let g = crownGraph('30');
+      g = addNode(g, { id: 'char:rival', type: 'character', props: { name: 'Rival' } });
+      g = addNode(g, {
+        id: 'char:deserter', type: 'character',
+        props: { name: 'Deserter', claimCircle: true, claimBp: 1800, wantChain: ['coin', 'office'], wantIndex: 1 },
+      });
+      g = addEdge(g, { type: 'loyalty', src: 'char:deserter', dst: 'char:ruler', props: { bp: 4000 } }); // low true loyalty -- restless-eligible
+
+      // Drive a REAL departure through advanceCharacterArcs -- the actual
+      // mechanism that cuts the loyalty edge, not a hand-waved "no edge"
+      // fixture -- confirming the repro end to end.
+      const arcs: Record<string, CharacterArc> = { 'restless:char:deserter': { kind: 'restless', charId: 'char:deserter', stage: 2, sinceTick: 6 } };
+      const departResult = advanceCharacterArcs(g, 9, arcs, makeEmitter(9), 'char:rival'); // (9-6)>=3 -- stage 3, terminal
+      expect(departResult.g.nodes['char:deserter']?.props['inRivalCourt']).toBe(true); // confirms departure actually fired
+      expect(findEdge(departResult.g, 'loyalty', 'char:deserter', 'char:ruler')).toBeUndefined(); // confirms the edge really is gone
+
+      const em = makeEmitter(10);
+      const post = declarationStep(departResult.g, 10, em);
+      expect(findEdge(post, 'backing', 'char:deserter', 'inst:crown')).toBeUndefined();
+      expect(em.all()).toHaveLength(0);
+      expect(hashValue(post)).toBe(hashValue(departResult.g));
+    });
+
+    it('an imprisoned circle character does not declare even with a fulfilled want and ample loyalty; pardoning (the real op) lifts the exclusion and they declare on a later tick -- proving it is temporary, not permanent', () => {
+      let g = crownGraph('0');
+      g = addNode(g, {
+        id: 'char:cell', type: 'character',
+        props: { name: 'In the Cell', claimCircle: true, claimBp: 900, wantChain: ['coin'], wantIndex: 1, imprisoned: true },
+      });
+      g = addEdge(g, { type: 'loyalty', src: 'char:cell', dst: 'char:ruler', props: { bp: 6000 } });
+
+      const em1 = makeEmitter(1);
+      const stillImprisoned = declarationStep(g, 1, em1);
+      expect(findEdge(stillImprisoned, 'backing', 'char:cell', 'inst:crown')).toBeUndefined();
+      expect(em1.all()).toHaveLength(0);
+      expect(hashValue(stillImprisoned)).toBe(hashValue(g));
+
+      // Pardon via the real 'pardon' op (ops.ts), not a hand-set prop --
+      // exercises the actual mechanism a player would use to lift this.
+      const pardoned = applyOp(stillImprisoned, { kind: 'pardon', charId: 'char:cell' }, 2, makeEmitter(2), 'seat:throne');
+      expect(getNode(pardoned, 'char:cell').props['imprisoned']).toBe(false);
+
+      const em2 = makeEmitter(3);
+      const post = declarationStep(pardoned, 3, em2);
+      expect(findEdge(post, 'backing', 'char:cell', 'inst:crown')).toBeDefined();
+      expect(em2.all()).toHaveLength(1);
+      expect(em2.all()[0]?.type).toBe('claim.declared');
     });
   });
 
