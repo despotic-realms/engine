@@ -18,6 +18,7 @@ import { fx } from '../src/fx.js';
 import { makeFortune } from '../src/fortune.js';
 import { addEdge, addNode, emptyGraph, findEdge, getNode, propFx } from '../src/graph.js';
 import type { WorldGraph } from '../src/graph.js';
+import type { TierRule } from '../src/ladder.js';
 import { DECLARE_LOYALTY, WAVERER_FLOOR } from '../src/loyalty.js';
 import { applyOp, DEEDS, OP_KINDS, TREACHERY_BP, validateOp } from '../src/ops.js';
 import type { FlashpointDef, Op, Term } from '../src/ops.js';
@@ -116,7 +117,17 @@ const ELSE_SETBACK = { seed: 'flashpoint-no-false-stone-setback', flashpointId: 
 const ELSE_COSTLY = { seed: 'flashpoint-decisive-costly', flashpointId: 'fp-decisive-costly', tick: 4 }; // roll 872 -> costly (else row: costly [800,980))
 const R1500_TRIUMPH = { seed: 'flashpoint-betrayal-triumph', flashpointId: 'fp-betrayal-triumph', tick: 2 }; // roll 825 -> triumph (r>=1500 row: triumph [700,1000))
 
-interface Pin { seed: string; flashpointId: string; tick: number }
+// `tierRules`/`tier` (v0.5.3 review fix, C1): optional, default to `[]`/
+// `-1` -- applyOp's own defaults -- so every pin above and every call site
+// below that never sets them is byte-for-byte unaffected: this whole
+// file's concern (Task 3) is which prop a given band sets, not whether a
+// season's own ladder rules authorize it (that is farm-exploit.test.ts's
+// concern). The one describe block that DOES care (the decisive-outcomes
+// block below) sets both explicitly, because after the C1 fix a bare
+// `decisive` field is no longer sufficient by itself to stamp anything --
+// a real matching TierRule must be present, exactly as every production
+// call site (tick.ts, mediate.ts) always supplies one.
+interface Pin { seed: string; flashpointId: string; tick: number; tierRules?: TierRule[]; tier?: number }
 
 /** Resolves press_claim for `def` under a fixed pin, returning the landed
  *  graph, the full event log, and the claim.flashpoint event itself. */
@@ -125,7 +136,7 @@ function pressClaim(g: WorldGraph, def: FlashpointDef, pin: Pin, parents: string
   const fortune = makeFortune(pin.seed);
   const g2 = applyOp(
     g, { kind: 'press_claim', flashpointId: pin.flashpointId }, pin.tick, em, 'seat:throne', parents,
-    { [pin.flashpointId]: def }, fortune,
+    { [pin.flashpointId]: def }, fortune, pin.tierRules ?? [], pin.tier ?? -1,
   );
   const flashpointEvent = em.all().find((e) => e.type === 'claim.flashpoint')!;
   return { g2, em, flashpointEvent };
@@ -476,11 +487,37 @@ describe('press_claim: negative trueScale floors at 0 (reviewer-verified probe, 
 describe('press_claim: decisive outcomes stamp crown props (claimPromoteTo/claimDemoteTo), never on non-qualifying bands', () => {
   const decisive = { promoteTo: 2, demoteOnRoutTo: 0 }; // 0 is a real tier value -- exercises "!== undefined", not truthiness
 
+  // v0.5.3 review fix (C1): applyOp's decisive-stamp step now requires a
+  // REAL matching TierRule for the press's own current tier before it will
+  // write claimPromoteTo/claimDemoteTo at all -- a bare `decisive` field on
+  // a FlashpointDef stopped being sufficient by itself the moment this fix
+  // landed (see ops.ts's own comment on this step for the full "why": a
+  // stamp written with no real authorization behind it is exactly the
+  // shape the whole-wave final review's C1 finding reproduced live). This
+  // block predates that concept entirely (Task 3, before any ladder
+  // wiring existed) and never threaded a tier context through pressClaim,
+  // so its three stamp-asserting tests below were unknowingly pinning the
+  // pre-fix fail-OPEN default (stamp regardless of authorization) rather
+  // than their own actual concern (does band X set the right prop). They
+  // are updated here to supply the same kind of real, satisfied season
+  // context every production call site (tick.ts, mediate.ts) always
+  // provides -- neither rule below carries a claimRequire, so once matched
+  // they authorize unconditionally, isolating this block's original
+  // concern (which prop, on which band) from farm-exploit.test.ts's
+  // separate claimRequire-gating concern. The fourth test in this block
+  // (setback) is untouched: a setback band never even attempts either
+  // stamp, with or without a tier context, so it has nothing to update.
+  const DECISIVE_TEST_RULES: TierRule[] = [
+    { from: 0, to: 2, kind: 'promote', note: 'test fixture: matches this block\'s decisive.promoteTo' },
+    { from: 0, to: 0, kind: 'demote', note: 'test fixture: matches this block\'s decisive.demoteOnRoutTo' },
+  ];
+  const DECISIVE_TIER = 0;
+
   it('triumph: claimPromoteTo lands, claimDemoteTo does not', () => {
     let g = crownGraph();
     g = withBacker(g, 'char:sole', 800, { loyalty: 6000 });
     const def: FlashpointDef = { assets: [], opposition: [], decisive, onBand: EMPTY_ON_BAND };
-    const { g2, flashpointEvent } = pressClaim(g, def, R1500_TRIUMPH);
+    const { g2, flashpointEvent } = pressClaim(g, def, { ...R1500_TRIUMPH, tierRules: DECISIVE_TEST_RULES, tier: DECISIVE_TIER });
     expect((flashpointEvent.data as { band: string }).band).toBe('triumph');
     expect(getNode(g2, 'inst:crown').props['claimPromoteTo']).toBe(2);
     expect(getNode(g2, 'inst:crown').props['claimDemoteTo']).toBeUndefined();
@@ -491,7 +528,7 @@ describe('press_claim: decisive outcomes stamp crown props (claimPromoteTo/claim
     let g = crownGraph({ alwaysTrue: true });
     g = withBacker(g, 'char:sole', 800, { loyalty: 6000 });
     const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), decisive, onBand: EMPTY_ON_BAND };
-    const { g2, flashpointEvent } = pressClaim(g, def, ELSE_COSTLY);
+    const { g2, flashpointEvent } = pressClaim(g, def, { ...ELSE_COSTLY, tierRules: DECISIVE_TEST_RULES, tier: DECISIVE_TIER });
     expect((flashpointEvent.data as { band: string }).band).toBe('costly');
     expect(getNode(g2, 'inst:crown').props['claimPromoteTo']).toBe(2);
     expect(getNode(g2, 'inst:crown').props['claimDemoteTo']).toBeUndefined();
@@ -501,7 +538,7 @@ describe('press_claim: decisive outcomes stamp crown props (claimPromoteTo/claim
     let g = crownGraph({ alwaysTrue: true });
     g = withBacker(g, 'char:sole', 800, { loyalty: 6000 });
     const def: FlashpointDef = { assets: [], opposition: elseRowOpposition(), decisive, onBand: EMPTY_ON_BAND };
-    const { g2, flashpointEvent } = pressClaim(g, def, ELSE_ROUT);
+    const { g2, flashpointEvent } = pressClaim(g, def, { ...ELSE_ROUT, tierRules: DECISIVE_TEST_RULES, tier: DECISIVE_TIER });
     expect((flashpointEvent.data as { band: string }).band).toBe('rout');
     expect(getNode(g2, 'inst:crown').props['claimDemoteTo']).toBe(0);
     expect(getNode(g2, 'inst:crown').props['claimPromoteTo']).toBeUndefined();
@@ -536,7 +573,16 @@ describe('press_claim: (f) determinism + replay', () => {
       decisive: { demoteOnRoutTo: 0 },
       onBand: { ...EMPTY_ON_BAND, rout: [{ kind: 'grant', charId: 'char:someone', amount: '10' }] },
     };
-    const pin = { seed: 'flashpoint-determinism-replay', flashpointId: 'fp-determinism', tick: 0 };
+    // v0.5.3 review fix (C1): a real matching demote rule for tier 0 is now
+    // required before claimDemoteTo stamps at all -- see this file's
+    // "decisive outcomes" describe block above for the full reasoning; this
+    // pin's own sanity check below (claimDemoteTo === 0) needs the same
+    // companion tierRules/tier this fix now requires everywhere else.
+    const pin = {
+      seed: 'flashpoint-determinism-replay', flashpointId: 'fp-determinism', tick: 0,
+      tierRules: [{ from: 0, to: 0, kind: 'demote' as const, note: 'test fixture: matches this pin\'s decisive.demoteOnRoutTo' }],
+      tier: 0,
+    };
 
     const runA = pressClaim(g0, def, pin);
     const runB = pressClaim(g0, def, pin);

@@ -1368,39 +1368,91 @@ export function applyOp(
       // CONDITIONAL. The roll always happens (backing readiness is exactly
       // what press_claim itself measures, per the real content's own dated
       // design comment, content/src/decks/tier0.ts:1436-1444) and every
-      // OTHER consequence of the band applies exactly as authored --
-      // onBand ops below, momentum nudges further down, and (unconditional,
-      // untouched) the demote stamp on a rout. Only the PROMOTION itself is
-      // withheld, and only when a matching season tier rule exists, carries
-      // its own claimRequire, and that requirement is not met -- the same
-      // (from: tier, kind: 'promote', to: promoteTo) lookup checkLadder's
-      // own decisive branch (ladder.ts) uses, and the same declaredBackingBp
-      // sum/treasury threshold checkLadder's ordinary claimRequire path and
-      // report.ts's claim projection already use (imported, not
-      // re-derived). No matching rule, or a matching rule with no
-      // claimRequire at all (an ordinary `when`-gated promotion has no
-      // press-time threshold to check here), is NOT evidence of a shortfall
-      // -- the stamp still lands, unsuppressed, exactly as it always did
-      // (see applyOp's own header comment for why this direction fails
-      // OPEN, not closed, unlike the retired validateOp gate). A withheld
-      // promotion is not silent: claim.flashpoint's own data carries
-      // `promotionWithheld: true` (present only then) so content can voice
-      // the hollow victory -- the gate and the claim's own backing are
-      // already player-visible via claimReport, so the event needs to say
-      // only THAT it happened, not recompute why.
+      // OTHER consequence of the band applies exactly as authored -- onBand
+      // ops below and momentum nudges further down. Only the PROMOTION
+      // itself is withheld, and only when a matching season tier rule
+      // exists, carries its own claimRequire, and that requirement is not
+      // met -- the same (from: tier, kind: 'promote', to: promoteTo) lookup
+      // checkLadder's own decisive branch (ladder.ts) uses, and the same
+      // declaredBackingBp sum/treasury threshold checkLadder's ordinary
+      // claimRequire path and report.ts's claim projection already use
+      // (imported, not re-derived).
+      //
+      // v0.5.3 review fix (2026-08-28, controller-adjudicated, Critical
+      // C1): NO matching rule for the press's own CURRENT tier is now
+      // withheld too, symmetrically with an unmet claimRequire -- both
+      // branches share the one `promotionWithheld` signal, since content
+      // only ever needs to know THAT a triumph/costly band did not
+      // culminate in a promotion, not why (same principle the v0.5.2
+      // comment above already states for the claimRequire case). Pre-fix,
+      // no matching rule was read as "nothing to suppress" and the stamp
+      // landed UNCONDITIONALLY -- fail OPEN. That is exactly backwards: a
+      // decisive stamp is a bare tier number with no memory of which tier
+      // or flashpoint authorized it (ladder.ts's own comment on
+      // CLAIM_TARGET_NONE), so a stamp written with no real authorization
+      // behind it can survive an unrelated later transition (applyTransition
+      // only clears a prop it just CONSUMED, ladder.ts:256-280) and then
+      // coincidentally match a REAL rule at some OTHER tier, firing it
+      // WITHOUT ever consulting that rule's own claimRequire (checkLadder's
+      // decisive branch is "never re-litigated" against a threshold once
+      // matched). Reproduced live: press a tier-0-keyed decisive flashpoint
+      // (decisive.promoteTo fixed at authoring time, e.g. 1, with no tier
+      // scoping of its own -- validateOp never scopes a press to a tier at
+      // all) while already AT tier 1; the lookup below wants a (from: 1,
+      // kind: 'promote', to: 1) rule, which no season authors, so pre-fix
+      // it stamped claimPromoteTo: 1 for free; an unrelated `when`-gated
+      // fall back to tier 0 left that stamp uncleared; tier 0's own next
+      // year-end then matched it against the real (0, promote, 1) return
+      // rule and fired it at zero backing (test/farm-exploit.test.ts's "C1"
+      // describe block pins this exact chain end to end). Fixed: `rule`
+      // must be found at all before anything is written -- see the
+      // `!rule` branch below, folded into the SAME `else` as an unmet
+      // claimRequire (a rule that doesn't exist can't have a satisfied
+      // claimRequire either, so `rule && !(...)` covers precisely "a real
+      // rule matched AND (it has no claimRequire OR that claimRequire
+      // holds)"; anything else -- no rule, or a rule with a shortfall --
+      // withholds). Every OTHER v0.5.2 consequence (the roll always
+      // happens, every onBand op and momentum nudge lands unchanged) is
+      // untouched -- this only ever gates the two decisive-prop writes.
+      //
+      // The demote side (claimDemoteTo on a rout) gets the SAME
+      // matching-rule gate now, for the identical reason: pre-fix it had NO
+      // rule lookup at all, unconditionally stamping def.decisive.
+      // demoteOnRoutTo whenever band === 'rout' -- the exact same
+      // no-memory-of-authorization shape as the promote bug, just with
+      // nothing even attempting to fail closed. This closes the case where
+      // NO (tier, demote, target) rule exists anywhere for the press's own
+      // tier. It does NOT, and structurally cannot, close a DIFFERENT
+      // finding the same review flagged as a sibling: a content season
+      // that happens to author an unrelated `when`-gated rule at the exact
+      // (tier, demote, target) triple a flashpoint's fixed demoteOnRoutTo
+      // can reach from some OTHER tier -- there a rule genuinely IS found
+      // (just not the one the flashpoint's own author had in mind), so a
+      // matching-rule gate has nothing to withhold. See
+      // meta/.git/sdd/engine-v053-report.md for the full audit; closing
+      // that residual shape needs either tier-scoping press_claim itself or
+      // giving a decisive stamp memory of which flashpoint/tier wrote it --
+      // both out of scope for this minimal, adjudicated fix. Demote has no
+      // claimRequire concept to further gate on (nothing is "paid" to avoid
+      // a rout), so existence of a matching rule is the whole check.
       const decisiveDeltas: GraphDelta[] = [];
       let promotionWithheld = false;
       const promoteTo = def.decisive?.promoteTo;
       if ((band === 'triumph' || band === 'costly') && promoteTo !== undefined) {
         const rule = tierRules.find((r) => r.from === tier && r.kind === 'promote' && r.to === promoteTo);
-        if (rule?.claimRequire && (declaredBackingBp(g) < rule.claimRequire.backingBp || treasury(g) < rule.claimRequire.treasury)) {
-          promotionWithheld = true;
-        } else {
+        const shortfall = rule?.claimRequire && (declaredBackingBp(g) < rule.claimRequire.backingBp || treasury(g) < rule.claimRequire.treasury);
+        if (rule && !shortfall) {
           decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: 'claimPromoteTo', value: promoteTo });
+        } else {
+          promotionWithheld = true;
         }
       }
       if (band === 'rout' && def.decisive?.demoteOnRoutTo !== undefined) {
-        decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: 'claimDemoteTo', value: def.decisive.demoteOnRoutTo });
+        const demoteTo = def.decisive.demoteOnRoutTo;
+        const rule = tierRules.find((r) => r.from === tier && r.kind === 'demote' && r.to === demoteTo);
+        if (rule) {
+          decisiveDeltas.push({ op: 'node.set', id: 'inst:crown', key: 'claimDemoteTo', value: demoteTo });
+        }
       }
       // v0.5.2 (severe exploit fix, gate B): stamps the tick THIS press
       // happened, keyed by flashpointId on the crown node, so a LATER

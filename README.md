@@ -276,10 +276,19 @@ rival's — named via `SeasonConfig.rivalId`, the rival keeps the very office
 this opposition weight reads, through every loss. Pressing always rolls —
 even hopelessly underprepared, so a season's own "call it early" design and
 its routed self-transition stay reachable below any backing threshold —
-but a winning roll's promotion lands only if the matching tier rule's own
-`claimRequire` holds at press time; otherwise the roll's other consequences
-still apply and `claim.flashpoint` carries `promotionWithheld: true` for
-content to voice as a hollow victory. A flashpoint may also declare
+but a winning roll's promotion lands only if a tier rule matching the
+flashpoint's CURRENT tier exists at all, and (when that rule declares one)
+its `claimRequire` holds at press time — a decisive verdict never
+authorizes itself; the same rule checkLadder would use to fire it ordinarily
+must be the one found. Either way the roll's other consequences still apply
+and `claim.flashpoint` carries `promotionWithheld: true` for content to
+voice as a hollow victory (v0.5.3 closes a cross-tier bypass here: no
+matching rule used to be read as nothing to suppress, letting a stamp made
+at the wrong tier survive an unrelated later fall and fire a real rule
+ungated once the reign happened to land back on a tier where the stored
+number coincidentally matched one). The demote side (a rout's own
+`claimDemoteTo`) is gated the same way, minus the `claimRequire` leg — a
+fall has no threshold to fall short of. A flashpoint may also declare
 `cooldownTicks`, a minimum gap enforced between two presses of the same
 flashpoint, so pressing for free, forever, is no longer a path to the
 throne (v0.5.2).
